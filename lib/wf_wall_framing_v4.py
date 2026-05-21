@@ -318,6 +318,8 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         host.length = length
         host.end_point = host.start_point + direction * length
         host.target_layer_offset = 0.0
+        host.raw_start_point = p0
+        host.raw_end_point = p1
         host.angle = math.atan2(direction.Y, direction.X)
         host.target_layer = target_layer
         host.target_depth_from_interior = target_depth

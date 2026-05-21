@@ -72,6 +72,26 @@ class FrameMultiSlopeV2Dialog(WPFWindow):
     def _on_custom_unchecked(self, sender, args):
         self.tb_custom_spacing.IsEnabled = False
 
+    def _get_combo_value(self, combo):
+        item = combo.SelectedItem
+        if not item:
+            return None
+        if hasattr(item, "Content"):
+            return str(item.Content)
+        return str(item)
+
+    def _select_combo_value(self, combo, value):
+        if not value:
+            return
+        try:
+            for item in combo.Items:
+                item_val = str(item.Content) if hasattr(item, "Content") else str(item)
+                if item_val == str(value):
+                    combo.SelectedItem = item
+                    return
+        except Exception:
+            pass
+
     def _on_ok(self, sender, args):
         config = FramingConfig()
 
@@ -107,6 +127,13 @@ class FrameMultiSlopeV2Dialog(WPFWindow):
         config.include_ceiling_joists = False
         config.include_roof_kickers = False
 
+        mode_val = self._get_combo_value(self.cb_roof_framing_mode)
+        if mode_val:
+            config.roof_framing_mode = mode_val
+        heel_val = self._get_combo_value(self.cb_heel_mode)
+        if heel_val:
+            config.heel_mode = heel_val
+
         self.result = {"config": config}
         self._save_last(config)
         self.Close()
@@ -121,6 +148,8 @@ class FrameMultiSlopeV2Dialog(WPFWindow):
             data["_rafter_label"] = str(self.cb_rafter_type.SelectedItem or "")
             data["_ridge_label"] = str(self.cb_ridge_type.SelectedItem or "")
             data["_edge_label"] = str(self.cb_edge_type.SelectedItem or "")
+            data["roof_framing_mode"] = self._get_combo_value(self.cb_roof_framing_mode)
+            data["heel_mode"] = self._get_combo_value(self.cb_heel_mode)
             directory = os.path.dirname(_CFG_PATH)
             if not os.path.exists(directory):
                 os.makedirs(directory)
@@ -158,6 +187,9 @@ class FrameMultiSlopeV2Dialog(WPFWindow):
             else:
                 self.rb_custom_sp.IsChecked = True
                 self.tb_custom_spacing.Text = str(spacing)
+
+            self._select_combo_value(self.cb_roof_framing_mode, data.get("roof_framing_mode", "stick"))
+            self._select_combo_value(self.cb_heel_mode, data.get("heel_mode", "flush"))
         except Exception:
             pass
 
@@ -220,8 +252,10 @@ def main():
         "- **Ridge board family:** {2} : {3}\n"
         "- **Eave / border family:** {4} : {5}\n"
         "- **Spacing:** {6:.2f} in OC\n"
+        "- **Roof framing mode:** {7}\n"
+        "- **Heel joint mode:** {8}\n"
         "- **Current scope:** rafters, ridge boards, and border members\n"
-        "- **Engine build:** {7}".format(
+        "- **Engine build:** {9}".format(
             config.stud_family_name,
             config.stud_type_name,
             config.header_family_name or config.stud_family_name,
@@ -229,6 +263,8 @@ def main():
             config.roof_edge_family_name or config.header_family_name or config.stud_family_name,
             config.roof_edge_type_name or config.header_type_name or config.stud_type_name,
             config.stud_spacing,
+            getattr(config, "roof_framing_mode", "stick"),
+            getattr(config, "heel_mode", "flush"),
             V2_BUILD_TAG,
         )
     )

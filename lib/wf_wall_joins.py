@@ -54,8 +54,8 @@ def build_wall_join_plan(doc, wall_info, config, stud_thickness):
 
     this_id = _element_id_value(wall_info.element_id)
     joined_ids = _joined_wall_ids(wall_info.element)
-    wall_start, wall_end = _framing_line_endpoints(wall_info)
-    wall_ends = (wall_start, wall_end)
+    raw_wall_start, raw_wall_end = _raw_line_endpoints(wall_info)
+    raw_wall_ends = (raw_wall_start, raw_wall_end)
 
     try:
         from Autodesk.Revit.DB import FilteredElementCollector, Line, Wall
@@ -93,14 +93,14 @@ def build_wall_join_plan(doc, wall_info, config, stud_thickness):
         if other_info is None:
             continue
 
-        other_start, other_end = _framing_line_endpoints(other_info)
+        other_start, other_end = _raw_line_endpoints(other_info)
 
         for end_index in (0, 1):
             is_official_join = other_id in joined_ids[end_index]
             if joined_ids[end_index] and not is_official_join:
                 continue
             other_end_index = _matching_end_index(
-                wall_ends[end_index],
+                raw_wall_ends[end_index],
                 other_start,
                 other_end,
             )
@@ -117,13 +117,13 @@ def build_wall_join_plan(doc, wall_info, config, stud_thickness):
             )
 
         for other_pt in (other_start, other_end):
-            distance = _intersection_distance(wall_start, wall_info, other_pt)
-            if distance is None:
+            framing_distance = _intersection_distance(raw_wall_start, wall_info, other_pt)
+            if framing_distance is None:
                 continue
 
             _merge_intersection_plan(
                 plan.intersections,
-                distance,
+                framing_distance,
                 other_id,
                 other_info,
                 stud_thickness,
@@ -216,16 +216,19 @@ def _merge_intersection_plan(items, distance, other_id, other_info, stud_thickne
     target.positions = [distance - offset, distance + offset]
 
 
-def _intersection_distance(start_pt, wall_info, point):
-    distance = _projection_distance(start_pt, wall_info.direction, point)
-    if distance <= END_CLEARANCE or distance >= wall_info.length - END_CLEARANCE:
-        return None
-
-    perp = _perpendicular_distance(start_pt, wall_info.direction, point)
+def _intersection_distance(raw_start_pt, wall_info, point):
+    distance = _projection_distance(raw_start_pt, wall_info.direction, point)
+    perp = _perpendicular_distance(raw_start_pt, wall_info.direction, point)
     if perp > INTERSECTION_TOL:
         return None
 
-    return distance
+    # Check clearance and bounds relative to the framing line
+    domain_start = getattr(wall_info, "domain_start", 0.0)
+    framing_distance = distance - domain_start
+    if framing_distance <= END_CLEARANCE or framing_distance >= wall_info.length - END_CLEARANCE:
+        return None
+
+    return framing_distance
 
 
 def _matching_end_index(target, start_pt, end_pt):
@@ -318,6 +321,12 @@ def _framing_line_endpoints(wall_info):
     start = _shift_point(wall_info.start_point, wall_info.normal, offset)
     end = _shift_point(wall_info.end_point, wall_info.normal, offset)
     return start, end
+
+
+def _raw_line_endpoints(wall_info):
+    if hasattr(wall_info, "raw_start_point") and wall_info.raw_start_point is not None:
+        return wall_info.raw_start_point, wall_info.raw_end_point
+    return wall_info.start_point, wall_info.end_point
 
 
 def _element_id_value(element_id):
