@@ -16,6 +16,7 @@ from wf_host import analyze_roof_host, _scanline_intervals
 from wf_placement import BaseFramingEngine
 from wf_schedule_utils import apply_bom_metadata
 from wf_tracking import tag_instance
+from wf_roof import _project_to_best_eave
 
 
 FLAT_THRESHOLD = 0.9998
@@ -29,6 +30,7 @@ COLLAR_TIE_FRACTION = 1.0 / 3.0
 MAX_COLLAR_TIE_SPACING = inches_to_feet(48.0)
 KICKER_FRACTION = 0.25
 V2_BUILD_TAG = "2026-04-22-tie-full-rewrite-1"
+PLATE_THICKNESS_V2 = inches_to_feet(1.5)
 
 
 class RoofBayPlan(object):
@@ -1118,9 +1120,15 @@ class RoofFramingEngineV2(BaseFramingEngine):
     def _members_from_plan(self, plan):
         members = []
         members.extend(self._make_ridge_boards_from_plan(plan))
-        seen = set()
-        for field in _placement_fields_for_plan(plan):
-            members.extend(self._make_field_members(plan, field, seen))
+
+        mode = getattr(self.config, "roof_framing_mode", "stick")
+        if mode in ("simple_truss", "king_post_truss"):
+            members.extend(self._make_trusses_from_plan(plan, mode))
+        else:
+            seen = set()
+            for field in _placement_fields_for_plan(plan):
+                members.extend(self._make_field_members(plan, field, seen))
+
         # Requested production scope: rafters, ridge boards, and border members only.
         # Rafter ties are intentionally disabled for now.
         self._record_skipped_secondary_members(plan)
@@ -1312,6 +1320,403 @@ class RoofFramingEngineV2(BaseFramingEngine):
         member.host_id = plane.element_id
         
         return [member]
+
+    # ------------------------------------------------------------------
+    #  Truss placement (V2 multi-slope)
+    # ------------------------------------------------------------------
+
+    def _make_trusses_from_plan(self, plan, mode):
+        """Generate truss members for all bays in the plan."""
+        members = []
+        spacing = self.config.stud_spacing_ft
+        if spacing <= 0.0:
+            return members
+
+        sloped = _sloped_planes(getattr(plan.roof_info, "planes", []) or [])
+        host_kind = getattr(plan.roof_info, "kind", "roof")
+        host_id = getattr(plan.roof_info, "element_id", None)
+        truss_index = 0
+        seen = set()
+
+        for bay in plan.bays:
+            ridge_dir = bay.ridge_end - bay.ridge_start
+            ridge_len = ridge_dir.GetLength()
+            if ridge_len < MIN_MEMBER_LENGTH:
+                continue
+            ridge_unit = ridge_dir.Multiply(1.0 / ridge_len)
+
+            # Get eave edges for each side of the bay
+            eave_a = self._eave_edges_for_bay_side(plan, bay.index, bay.plane_a_index)
+            eave_b = self._eave_edges_for_bay_side(plan, bay.index, bay.plane_b_index)
+            if not eave_a or not eave_b:
+                continue
+
+            # Get planes
+            pa = None
+            pb = None
+            if 0 <= bay.plane_a_index < len(sloped):
+                pa = sloped[bay.plane_a_index]
+            if 0 <= bay.plane_b_index < len(sloped):
+                pb = sloped[bay.plane_b_index]
+            if pa is None or pb is None:
+                continue
+
+            d = 0.0
+            while d <= ridge_len + 1e-9:
+                ridge_pt = bay.ridge_start + ridge_unit.Multiply(min(d, ridge_len))
+                foot_a = _project_to_best_eave(ridge_pt, eave_a, bay.ridge_start, bay.ridge_end)
+                foot_b = _project_to_best_eave(ridge_pt, eave_b, bay.ridge_start, bay.ridge_end)
+                if foot_a is None or foot_b is None:
+                    d += spacing
+                    continue
+
+                if _dist(foot_a, foot_b) >= MIN_MEMBER_LENGTH:
+                    key = (_pt_key(foot_a), _pt_key(foot_b))
+                    rkey = (_pt_key(foot_b), _pt_key(foot_a))
+                    if key not in seen and rkey not in seen:
+                        seen.add(key)
+                        truss_members = self._generate_truss_members_v2(
+                            foot_a, foot_b, ridge_pt, pa, pb,
+                            ridge_unit, truss_index,
+                            host_kind, host_id, mode,
+                        )
+                        members.extend(truss_members)
+                        truss_index += 1
+                d += spacing
+
+        return members
+
+    def _eave_edges_for_bay_side(self, plan, bay_index, plane_index):
+        """Return eave edges for one side of a bay."""
+        for field in getattr(plan, "fields", []) or []:
+            if field.ridge_index == bay_index and field.plane_index == plane_index:
+                edges = list(getattr(field, "eave_edges", []) or [])
+                if not edges:
+                    edges = list(getattr(field, "ledger_edges", []) or [])
+                return edges
+        return []
+
+    def _resolve_roof_member_size_v2(self, family_name, type_name):
+        """Resolve member thickness and depth from the type or nominal size."""
+        depth = self.get_type_depth(family_name, type_name)
+        width = None
+
+        text = "{0} {1}".format(family_name or "", type_name or "").lower()
+        for nominal, dimensions in LUMBER_ACTUAL.items():
+            if nominal.lower() in text:
+                width = inches_to_feet(dimensions[0])
+                if depth is None or depth <= 0.0:
+                    depth = inches_to_feet(dimensions[1])
+                break
+
+        if depth is not None and depth > 0.0:
+            if width is None or width <= 0.0:
+                width = PLATE_THICKNESS_V2
+            return width, depth
+
+        match = re.search(r"\b2x(2|3|4|6|8|10|12)\b", text)
+        if match:
+            nominal = "2x{0}".format(match.group(1))
+            dims = LUMBER_ACTUAL.get(nominal)
+            if dims is not None:
+                return inches_to_feet(dims[0]), inches_to_feet(dims[1])
+
+        return PLATE_THICKNESS_V2, 0.0
+
+    def _validate_geometry_v2(self, foot_a, foot_b, pa, pb):
+        """Ensure geometric limits for detailed truss execution."""
+        from Autodesk.Revit.DB import XYZ
+
+        span_vec = XYZ(foot_b.X - foot_a.X, foot_b.Y - foot_a.Y, 0.0)
+        if span_vec.GetLength() < 4.0:  # Minimum span 4 feet for truss
+            return False
+
+        # Check slopes
+        for plane in (pa, pb):
+            cos_theta = plane.normal.Z
+            if cos_theta > 0.999:  # Almost flat
+                return False
+            sin_theta = math.sqrt(1.0 - cos_theta * cos_theta)
+            slope = sin_theta / cos_theta
+            if slope < 0.05:  # less than ~5% slope
+                return False
+        return True
+
+    def _calc_vertical_plane_rotation_v2(self, member_dir, E):
+        """Calculate the cross-section rotation for a member lying in the vertical plane.
+
+        The width axis should align with the extrusion direction E.
+        The depth direction is perpendicular to both the member direction and E.
+        """
+        member_dir_unit = _normalize(member_dir)
+        if member_dir_unit is None:
+            return 0.0
+        desired_up = E.CrossProduct(member_dir_unit)
+        if desired_up.GetLength() < 1e-6:
+            return 0.0
+        desired_up = desired_up.Normalize()
+        if desired_up.Z < 0.0:
+            desired_up = desired_up.Multiply(-1.0)
+        return _rotation_from_up(member_dir_unit, desired_up)
+
+    def _generate_truss_members_v2(self, foot_a, foot_b, ridge_pt, pa, pb,
+                                   ridge_unit, truss_index,
+                                   host_kind, host_id, mode):
+        """Generate bottom chord, top chords, and webs for a single truss line."""
+        # NOTE:
+        # Detailed truss mode generates BIM framing geometry only.
+        # Structural sizing and connection engineering must be verified separately.
+        from Autodesk.Revit.DB import XYZ
+
+        members = []
+
+        # Get member family size info
+        family_name = self.config.stud_family_name
+        type_name = self.config.stud_type_name
+        member_width, member_depth = self._resolve_roof_member_size_v2(family_name, type_name)
+        if member_depth <= 0.0:
+            member_depth = inches_to_feet(5.5)  # 2x6 fallback depth
+        if member_width <= 0.0:
+            member_width = inches_to_feet(1.5)  # 2x6 fallback thickness
+
+        # Define local axes of the truss
+        span_vec = XYZ(foot_b.X - foot_a.X, foot_b.Y - foot_a.Y, 0.0)
+        span_len = span_vec.GetLength()
+        if span_len < 1e-4:
+            return []
+        H = span_vec.Normalize()
+
+        # Extrusion direction along the ridge
+        E = ridge_unit
+
+        # Base elevation: standard residential wood frame usually sits on eave wall plate
+        Z_eave = min(foot_a.Z, foot_b.Z)
+
+        # Geometry validation
+        if not self._validate_geometry_v2(foot_a, foot_b, pa, pb):
+            # Fallback to standard stick member (bottom chord only or similar) if invalid for full truss
+            m = FramingMember(FramingMember.STUD, foot_a, foot_b)
+            m.member_type = "TRUSS"
+            m.family_name = family_name
+            m.type_name = type_name
+            m.rotation = 0.0
+            m.host_kind = host_kind
+            m.host_id = host_id
+            m.group_id = str(truss_index)
+            m.parent_id = str(host_id)
+            return [m]
+
+        min_length = inches_to_feet(2.0)
+
+        # Calculate depths from roof exterior to member centerlines
+        layer_top_depth_a = _resolve_roof_layer_top_depth(pa)
+        layer_top_depth_b = _resolve_roof_layer_top_depth(pb)
+
+        control_depth_a = layer_top_depth_a + member_depth / 2.0
+        control_depth_b = layer_top_depth_b + member_depth / 2.0
+
+        # Center points at ridge and eaves offset down from exterior surface
+        ridge_center_a = ridge_pt - pa.normal.Multiply(control_depth_a)
+        ridge_center_b = ridge_pt - pb.normal.Multiply(control_depth_b)
+
+        foot_a_center = foot_a - pa.normal.Multiply(control_depth_a)
+        foot_b_center = foot_b - pb.normal.Multiply(control_depth_b)
+
+        # Calculate chord directions
+        dir_a = ridge_center_a - foot_a_center
+        len_a = dir_a.GetLength()
+        if len_a < 1e-4:
+            return []
+        dir_a_unit = dir_a.Normalize()
+
+        dir_b = ridge_center_b - foot_b_center
+        len_b = dir_b.GetLength()
+        if len_b < 1e-4:
+            return []
+        dir_b_unit = dir_b.Normalize()
+
+        # Bottom chord centerline elevation
+        Z_bottom_center = Z_eave + member_depth / 2.0
+
+        # Intersection of sloped top chord centerlines with horizontal bottom chord centerline
+        if abs(dir_a_unit.Z) > 1e-4:
+            t_a = (Z_bottom_center - foot_a_center.Z) / dir_a_unit.Z
+            heel_left = foot_a_center + dir_a_unit.Multiply(t_a)
+        else:
+            heel_left = foot_a_center
+
+        if abs(dir_b_unit.Z) > 1e-4:
+            t_b = (Z_bottom_center - foot_b_center.Z) / dir_b_unit.Z
+            heel_right = foot_b_center + dir_b_unit.Multiply(t_b)
+        else:
+            heel_right = foot_b_center
+
+        # Peak intersection of the two sloped top chord centerlines in the truss plane
+        u_hl = (heel_left - foot_a).DotProduct(H)
+        v_hl = heel_left.Z
+        u_dl = dir_a_unit.DotProduct(H)
+        v_dl = dir_a_unit.Z
+
+        u_hr = (heel_right - foot_a).DotProduct(H)
+        v_hr = heel_right.Z
+        u_dr = dir_b_unit.DotProduct(H)
+        v_dr = dir_b_unit.Z
+
+        det = u_dr * v_dl - u_dl * v_dr
+        if abs(det) > 1e-6:
+            num_t = u_dr * (v_hr - v_hl) - (u_hr - u_hl) * v_dr
+            t_peak = num_t / det
+            u_int = u_hl + t_peak * u_dl
+            v_int = v_hl + t_peak * v_dl
+            peak = XYZ(foot_a.X + u_int * H.X, foot_a.Y + u_int * H.Y, v_int)
+        else:
+            peak = ridge_center_a.Multiply(0.5) + ridge_center_b.Multiply(0.5)
+
+        # Apply heel mode offsets
+        heel_mode = getattr(self.config, "heel_mode", "flush")
+
+        tc_left_start = heel_left
+        tc_left_end = peak
+        tc_right_start = heel_right
+        tc_right_end = peak
+
+        bc_start = heel_left
+        bc_end = heel_right
+
+        if heel_mode == "seat_cut":
+            # Shift top chords up vertically by member_depth
+            vertical_offset = XYZ(0, 0, member_depth)
+            tc_left_start = tc_left_start + vertical_offset
+            tc_left_end = tc_left_end + vertical_offset
+            tc_right_start = tc_right_start + vertical_offset
+            tc_right_end = tc_right_end + vertical_offset
+        elif heel_mode == "overlap":
+            # Shift top chords laterally (along E) to overlap side-by-side
+            tc_left_start = tc_left_start + E.Multiply(member_width)
+            tc_left_end = tc_left_end + E.Multiply(member_width)
+            tc_right_start = tc_right_start - E.Multiply(member_width)
+            tc_right_end = tc_right_end - E.Multiply(member_width)
+
+        # Rotations for top chords in vertical plane
+        rot_left = self._calc_vertical_plane_rotation_v2(tc_left_end - tc_left_start, E)
+        rot_right = self._calc_vertical_plane_rotation_v2(tc_right_end - tc_right_start, E)
+        rot_bottom = self._calc_vertical_plane_rotation_v2(bc_end - bc_start, E)
+
+        # Build Bottom Chord
+        if (bc_end - bc_start).GetLength() >= min_length:
+            bc = FramingMember(FramingMember.STUD, bc_start, bc_end)
+            bc.member_type = "TRUSS_BOTTOM_CHORD"
+            bc.family_name = family_name
+            bc.type_name = type_name
+            bc.rotation = rot_bottom
+            bc.host_kind = host_kind
+            bc.host_id = host_id
+            bc.group_id = str(truss_index)
+            bc.parent_id = str(host_id)
+            bc.supported_by = "WALL"
+            bc.supports = ["TRUSS_TOP_CHORD"]
+            members.append(bc)
+
+        # Build Left Top Chord
+        if (tc_left_end - tc_left_start).GetLength() >= min_length:
+            tc_left = FramingMember(FramingMember.STUD, tc_left_start, tc_left_end)
+            tc_left.member_type = "TRUSS_TOP_CHORD"
+            tc_left.family_name = family_name
+            tc_left.type_name = type_name
+            tc_left.rotation = rot_left
+            tc_left.host_kind = host_kind
+            tc_left.host_id = host_id
+            tc_left.group_id = str(truss_index)
+            tc_left.parent_id = str(host_id)
+            tc_left.supported_by = "TRUSS_BOTTOM_CHORD"
+            tc_left.supports = ["ROOF_DECK"]
+            members.append(tc_left)
+
+        # Build Right Top Chord
+        if (tc_right_end - tc_right_start).GetLength() >= min_length:
+            tc_right = FramingMember(FramingMember.STUD, tc_right_start, tc_right_end)
+            tc_right.member_type = "TRUSS_TOP_CHORD"
+            tc_right.family_name = family_name
+            tc_right.type_name = type_name
+            tc_right.rotation = rot_right
+            tc_right.host_kind = host_kind
+            tc_right.host_id = host_id
+            tc_right.group_id = str(truss_index)
+            tc_right.parent_id = str(host_id)
+            tc_right.supported_by = "TRUSS_BOTTOM_CHORD"
+            tc_right.supports = ["ROOF_DECK"]
+            members.append(tc_right)
+
+        # Add King Post and Diagonals if king_post_truss mode
+        if mode == "king_post_truss":
+            center_u = (u_hl + u_hr) / 2.0
+            kp_pt_bottom = foot_a + H.Multiply(center_u)
+
+            kp_start_z = Z_bottom_center + member_depth / 2.0
+            kp_end_z = peak.Z - member_depth / 2.0
+
+            kp_start = XYZ(kp_pt_bottom.X, kp_pt_bottom.Y, kp_start_z)
+            kp_end = XYZ(kp_pt_bottom.X, kp_pt_bottom.Y, kp_end_z)
+
+            if (kp_end - kp_start).GetLength() >= min_length:
+                kp = FramingMember(FramingMember.STUD, kp_start, kp_end)
+                kp.is_column = True
+                kp.member_type = "TRUSS_KING_POST"
+                kp.family_name = family_name
+                kp.type_name = type_name
+                kp.rotation = self._calc_vertical_plane_rotation_v2(kp_end - kp_start, E)
+                kp.host_kind = host_kind
+                kp.host_id = host_id
+                kp.group_id = str(truss_index)
+                kp.parent_id = str(host_id)
+                kp.supported_by = "TRUSS_BOTTOM_CHORD"
+                kp.supports = ["TRUSS_TOP_CHORD"]
+                members.append(kp)
+
+                mid_left = (tc_left_start + tc_left_end).Multiply(0.5)
+                mid_right = (tc_right_start + tc_right_end).Multiply(0.5)
+
+                if (mid_left - kp_start).GetLength() >= min_length:
+                    diag_left = FramingMember(FramingMember.STUD, kp_start, mid_left)
+                    diag_left.member_type = "TRUSS_DIAGONAL"
+                    diag_left.family_name = family_name
+                    diag_left.type_name = type_name
+                    diag_left.rotation = self._calc_vertical_plane_rotation_v2(mid_left - kp_start, E)
+                    diag_left.host_kind = host_kind
+                    diag_left.host_id = host_id
+                    diag_left.group_id = str(truss_index)
+                    diag_left.parent_id = str(host_id)
+                    diag_left.supported_by = "TRUSS_KING_POST"
+                    diag_left.supports = ["TRUSS_TOP_CHORD"]
+                    members.append(diag_left)
+
+                if (mid_right - kp_start).GetLength() >= min_length:
+                    diag_right = FramingMember(FramingMember.STUD, kp_start, mid_right)
+                    diag_right.member_type = "TRUSS_DIAGONAL"
+                    diag_right.family_name = family_name
+                    diag_right.type_name = type_name
+                    diag_right.rotation = self._calc_vertical_plane_rotation_v2(mid_right - kp_start, E)
+                    diag_right.host_kind = host_kind
+                    diag_right.host_id = host_id
+                    diag_right.group_id = str(truss_index)
+                    diag_right.parent_id = str(host_id)
+                    diag_right.supported_by = "TRUSS_KING_POST"
+                    diag_right.supports = ["TRUSS_TOP_CHORD"]
+                    members.append(diag_right)
+
+        # Debug geometry curves if enabled
+        if getattr(self, "DEBUG_GEOMETRY", False):
+            try:
+                from Autodesk.Revit.DB import Line as DebugLine
+                if foot_a.DistanceTo(foot_b) >= 1e-4:
+                    self.doc.Create.NewModelCurve(
+                        DebugLine.CreateBound(foot_a, foot_b),
+                        None,
+                    )
+            except Exception:
+                pass
+
+        return members
 
     def _field_for_bay_side(self, plan, bay_index, plane_index):
         for field in getattr(plan, "fields", []) or []:

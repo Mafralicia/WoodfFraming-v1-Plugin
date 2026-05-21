@@ -142,9 +142,16 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         if host is None:
             return [], None
 
+        # Build wall join plan for automatic corner/intersection stud placement
+        from wf_wall_joins import build_wall_join_plan
+        host.join_plan = build_wall_join_plan(
+            self.doc, host, self.config, STUD_THICKNESS
+        )
+
         occupied = set()
         members = []
         members.extend(self._wall_shape_members(host, occupied))
+        members.extend(self._corner_and_intersection_studs(host, occupied))
         members.extend(self._opening_members(host, occupied))
         members.extend(self._infill_members(host, occupied))
         
@@ -309,6 +316,8 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         host.normal = interior_normal
         host.into_wall = into_wall
         host.length = length
+        host.end_point = host.start_point + direction * length
+        host.target_layer_offset = 0.0
         host.angle = math.atan2(direction.Y, direction.X)
         host.target_layer = target_layer
         host.target_depth_from_interior = target_depth
@@ -767,6 +776,60 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                     candidate_count,
                 )
                 self._finish_side_stud_attempt(attempt, "rejected", reason)
+        return members
+
+    def _corner_and_intersection_studs(self, host, occupied):
+        """Generate corner studs and intersection backing studs from the join plan."""
+        members = []
+        join_plan = getattr(host, "join_plan", None)
+        if join_plan is None:
+            return members
+
+        # End-join corner studs
+        for end_index in (0, 1):
+            end_plan = join_plan.ends[end_index]
+            if not end_plan.has_join:
+                continue
+            for pos in end_plan.positions:
+                d = pos
+                if round(d, 4) in occupied:
+                    continue
+                member = self._vertical_member_at_d(
+                    host, "STUD", d, None, None, False
+                )
+                if member is not None:
+                    member.member_type = "CORNER_STUD"
+                    if end_plan.other_wall_id is not None:
+                        member.group_id = str(
+                            getattr(end_plan.other_wall_id, "IntegerValue",
+                                    getattr(end_plan.other_wall_id, "Value",
+                                            end_plan.other_wall_id))
+                        )
+                    member.supported_by = "WALL"
+                    members.append(member)
+                    occupied.add(round(d, 4))
+
+        # T-intersection backing studs
+        for intersection in join_plan.intersections:
+            for pos in intersection.positions:
+                d = pos
+                if round(d, 4) in occupied:
+                    continue
+                member = self._vertical_member_at_d(
+                    host, "STUD", d, None, None, False
+                )
+                if member is not None:
+                    member.member_type = "INTERSECTION_BACKING_STUD"
+                    if intersection.other_wall_id is not None:
+                        member.group_id = str(
+                            getattr(intersection.other_wall_id, "IntegerValue",
+                                    getattr(intersection.other_wall_id, "Value",
+                                            intersection.other_wall_id))
+                        )
+                    member.supported_by = "WALL"
+                    members.append(member)
+                    occupied.add(round(d, 4))
+
         return members
 
     def _record_side_stud_attempt(self, host, segment, raw_d, stud_d):
