@@ -102,6 +102,54 @@ BOM_PARAMETER_DEFS = (
         "hide_when_no_value": False,
         "description": "Length used for BOM totals.",
     },
+    {
+        "name": "WF_ParentId",
+        "guid": "e528b80b-cc20-410a-b30c-5197825b42d1",
+        "spec": "text",
+        "categories": (
+            DB.BuiltInCategory.OST_StructuralFraming,
+            DB.BuiltInCategory.OST_StructuralColumns,
+        ),
+        "group": "data",
+        "hide_when_no_value": True,
+        "description": "Parent host element ID (Wall or Roof).",
+    },
+    {
+        "name": "WF_GroupId",
+        "guid": "d3c11e6d-5cc0-4966-8809-53e77f09d2cc",
+        "spec": "text",
+        "categories": (
+            DB.BuiltInCategory.OST_StructuralFraming,
+            DB.BuiltInCategory.OST_StructuralColumns,
+        ),
+        "group": "data",
+        "hide_when_no_value": True,
+        "description": "Group ID of the opening or truss configuration.",
+    },
+    {
+        "name": "WF_SupportedBy",
+        "guid": "10f27c8a-7e3e-4fb6-ba6a-360b4de09db1",
+        "spec": "text",
+        "categories": (
+            DB.BuiltInCategory.OST_StructuralFraming,
+            DB.BuiltInCategory.OST_StructuralColumns,
+        ),
+        "group": "data",
+        "hide_when_no_value": True,
+        "description": "Indicates the member role that supports this member.",
+    },
+    {
+        "name": "WF_Supports",
+        "guid": "920364ea-58b1-419b-ab29-6b583f7ea4cb",
+        "spec": "text",
+        "categories": (
+            DB.BuiltInCategory.OST_StructuralFraming,
+            DB.BuiltInCategory.OST_StructuralColumns,
+        ),
+        "group": "data",
+        "hide_when_no_value": True,
+        "description": "Indicates the member roles supported by this member.",
+    },
 )
 
 
@@ -217,7 +265,7 @@ def ensure_sheathing_parameters(doc):
     _ensure_shared_parameters(doc, SHEATHING_PARAMETER_DEFS)
 
 
-def apply_bom_metadata(instance, host_info, member_role, length_ft=None):
+def apply_bom_metadata(instance, host_info, member_role, length_ft=None, parent_id=None, group_id=None, supported_by=None, supports=None):
     """Write BOM metadata directly to a framing instance."""
     if instance is None or host_info is None:
         return
@@ -229,6 +277,9 @@ def apply_bom_metadata(instance, host_info, member_role, length_ft=None):
     if host_element is None and host_id is not None:
         host_element = _get_element_by_id(doc, host_id)
 
+    p_id = parent_id or _element_id_string(host_id)
+    supports_str = ",".join(supports) if isinstance(supports, (list, tuple, set)) else (supports or None)
+
     _write_bom_metadata(
         instance,
         True,
@@ -237,6 +288,10 @@ def apply_bom_metadata(instance, host_info, member_role, length_ft=None):
         _host_label(doc, host_element, host_kind, host_id),
         _member_role_label(member_role),
         length_ft if length_ft is not None else _element_length_ft(instance),
+        parent_id=p_id,
+        group_id=group_id,
+        supported_by=supported_by,
+        supports=supports_str,
     )
 
 
@@ -252,10 +307,19 @@ def apply_bom_metadata_from_member(instance, host_info, member):
         getattr(member, "host_kind", None) or getattr(host_info, "kind", None)
     )
 
+    p_id = getattr(member, "parent_id", None) or _element_id_string(host_id)
+    g_id = getattr(member, "group_id", None)
+    sup_by = getattr(member, "supported_by", None)
+    sups = getattr(member, "supports", None)
+
     apply_bom_metadata(
         instance,
         _SimpleHostInfo(host_kind, host_id, host_element),
         getattr(member, "member_type", None),
+        parent_id=p_id,
+        group_id=g_id,
+        supported_by=sup_by,
+        supports=sups,
     )
 
 
@@ -577,6 +641,7 @@ def _ensure_shared_parameter_file():
         "*PARAM\tGUID\tNAME\tDATATYPE\tDATACATEGORY\tGROUP\tVISIBLE\tDESCRIPTION\tUSERMODIFIABLE\tHIDEWHENNOVALUE",
         "WF_IsGenerated",
         "WF_SheathHostLabel",
+        "WF_ParentId",
     ]
     for token in required_tokens:
         if token not in text:
@@ -811,13 +876,18 @@ def _shared_parameter_element_id(doc, parameter_name):
 
 
 def _write_bom_metadata(element, is_generated, host_kind, host_id, host_label,
-                        member_role, member_length_ft):
+                        member_role, member_length_ft,
+                        parent_id=None, group_id=None, supported_by=None, supports=None):
     _set_shared_int(element, "WF_IsGenerated", 1 if is_generated else 0)
     _set_shared_text(element, "WF_HostKind", host_kind)
     _set_shared_text(element, "WF_HostId", host_id)
     _set_shared_text(element, "WF_HostLabel", host_label)
     _set_shared_text(element, "WF_MemberRole", member_role)
     _set_shared_double(element, "WF_MemberLength", member_length_ft or 0.0)
+    _set_shared_text(element, "WF_ParentId", parent_id)
+    _set_shared_text(element, "WF_GroupId", group_id)
+    _set_shared_text(element, "WF_SupportedBy", supported_by)
+    _set_shared_text(element, "WF_Supports", supports)
 
 
 def _clear_bom_metadata(element):
@@ -827,6 +897,10 @@ def _clear_bom_metadata(element):
     _set_shared_text(element, "WF_HostLabel", None)
     _set_shared_text(element, "WF_MemberRole", None)
     _set_shared_double(element, "WF_MemberLength", 0.0)
+    _set_shared_text(element, "WF_ParentId", None)
+    _set_shared_text(element, "WF_GroupId", None)
+    _set_shared_text(element, "WF_SupportedBy", None)
+    _set_shared_text(element, "WF_Supports", None)
 
 
 def _has_bom_host_metadata(element):

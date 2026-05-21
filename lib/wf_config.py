@@ -106,6 +106,13 @@ class FramingConfig(object):
         self.roof_edge_family_name = None
         self.roof_edge_type_name = None
 
+        # Framing strategy options
+        self.sill_mode = "standard"                  # standard | reinforced | engineered
+        self.jack_strategy = "continuous"            # continuous | split
+        self.heel_mode = "flush"                    # flush | seat_cut | overlap
+        self.truss_style = "king_post"               # king_post
+        self.roof_framing_mode = "stick"             # stick | simple_truss | king_post_truss
+
         # Generated-member ownership tracking
         self.track_members = True
 
@@ -152,6 +159,11 @@ class FramingConfig(object):
             "include_roof_kickers": self.include_roof_kickers,
             "roof_edge_family_name": self.roof_edge_family_name,
             "roof_edge_type_name": self.roof_edge_type_name,
+            "sill_mode": self.sill_mode,
+            "jack_strategy": self.jack_strategy,
+            "heel_mode": self.heel_mode,
+            "truss_style": self.truss_style,
+            "roof_framing_mode": self.roof_framing_mode,
             "track_members": self.track_members,
         }
 
@@ -177,3 +189,4 @@ class FramingConfig(object):
         with open(filepath, "r") as f:
             data = json.load(f)
         return cls.from_dict(data)
+

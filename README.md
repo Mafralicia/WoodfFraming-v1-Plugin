@@ -2,11 +2,7 @@
 
 `swich-wood-framing` is a pyRevit extension for Autodesk Revit wood framing workflows.
 
-This repository contains one pyRevit extension folder:
-
-```text
-WoodFraming.extension/
-```
+This repository is structured as a pyRevit extension itself.
 
 When loaded in Revit, the extension adds a `Wood Framing` tab with a `Wood Framing` panel and `Material Takeoffs` panel.
 
@@ -58,7 +54,7 @@ Use this option when you want pyRevit to load the extension from its default use
 
    Create the `Extensions` folder if it does not exist.
 
-3. Copy the `WoodFraming.extension` folder from this repo into that folder.
+3. Create a folder named `WoodFraming.extension` in that directory and copy all files and folders from this repository into it.
 4. Confirm the final structure looks like this:
 
    ```text
@@ -66,7 +62,7 @@ Use this option when you want pyRevit to load the extension from its default use
      WoodFraming.extension\
        extension.json
        lib\
-       Wood Framing.tab\
+       Wood Framing v2.tab\
    ```
 
 5. Open Revit 2026.
@@ -76,30 +72,29 @@ Use this option when you want pyRevit to load the extension from its default use
 
 Use this option when you want to keep the repo in place and have pyRevit load it from this working folder.
 
-1. Keep the repo folder in a stable location.
+1. Keep the repo folder in a stable location, and ensure the repo folder name ends with `.extension` (e.g. rename the folder to `WoodFraming.extension`).
 2. In Revit, open pyRevit settings.
-3. Add the parent folder that contains `WoodFraming.extension` to the custom extension directories list.
+3. Add the parent folder that contains the renamed repo folder (ending in `.extension`) to the custom extension directories list.
 
    To complete this checkout, utilize the file explorer to identify and choose the directory where the folder was previously saved.
 
-   Do not add the `WoodFraming.extension` folder itself. Add the folder that contains it.
+   Do not add the extension folder itself. Add the folder that contains it.
 
 4. Save the settings.
 5. Reload pyRevit or restart Revit.
-6. Look for the `Wood Framing` tab and `Wood Framing` pulldown.
+6. Look for the `Wood Framing` tab.
 
 ## Repository layout
 
 ```text
-WoodFraming.extension/
-  extension.json
-  lib/
-  Wood Framing.tab/
+extension.json
+lib/
+Wood Framing v2.tab/
 ```
 
 - `extension.json` contains the pyRevit extension metadata.
 - `lib/` contains shared Python modules for framing, geometry, family handling, schedules, tracking, host analysis, floors, ceilings, roofs, and wall framing.
-- `Wood Framing.tab/` contains the pyRevit ribbon structure and active tool buttons.
+- `Wood Framing v2.tab/` contains the pyRevit ribbon structure and active tool buttons.
 
 ## pyRevit references checked
 

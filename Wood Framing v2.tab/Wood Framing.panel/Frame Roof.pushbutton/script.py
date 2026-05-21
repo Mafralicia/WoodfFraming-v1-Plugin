@@ -70,6 +70,26 @@ class FrameRoofDialog(WPFWindow):
     def _on_custom_unchecked(self, sender, args):
         self.tb_custom_spacing.IsEnabled = False
 
+    def _get_combo_value(self, combo):
+        item = combo.SelectedItem
+        if not item:
+            return None
+        if hasattr(item, "Content"):
+            return str(item.Content)
+        return str(item)
+
+    def _select_combo_value(self, combo, value):
+        if not value:
+            return
+        try:
+            for item in combo.Items:
+                item_val = str(item.Content) if hasattr(item, "Content") else str(item)
+                if item_val == str(value):
+                    combo.SelectedItem = item
+                    return
+        except Exception:
+            pass
+
     def _on_ok(self, sender, args):
         cfg = FramingConfig()
 
@@ -99,6 +119,13 @@ class FrameRoofDialog(WPFWindow):
         cfg.include_ceiling_joists = False
         cfg.include_roof_kickers = False
 
+        mode_val = self._get_combo_value(self.cb_roof_framing_mode)
+        if mode_val:
+            cfg.roof_framing_mode = mode_val
+        heel_val = self._get_combo_value(self.cb_heel_mode)
+        if heel_val:
+            cfg.heel_mode = heel_val
+
         self.result = {"config": cfg}
         self._save_last(cfg)
         self.Close()
@@ -112,6 +139,8 @@ class FrameRoofDialog(WPFWindow):
             data = cfg.to_dict()
             data["_rafter_label"] = str(self.cb_rafter_type.SelectedItem or "")
             data["_ridge_label"] = str(self.cb_ridge_type.SelectedItem or "")
+            data["roof_framing_mode"] = self._get_combo_value(self.cb_roof_framing_mode)
+            data["heel_mode"] = self._get_combo_value(self.cb_heel_mode)
             directory = os.path.dirname(_CFG_PATH)
             if not os.path.exists(directory):
                 os.makedirs(directory)
@@ -143,6 +172,9 @@ class FrameRoofDialog(WPFWindow):
             else:
                 self.rb_custom_sp.IsChecked = True
                 self.tb_custom_spacing.Text = str(spacing)
+
+            self._select_combo_value(self.cb_roof_framing_mode, data.get("roof_framing_mode", "stick"))
+            self._select_combo_value(self.cb_heel_mode, data.get("heel_mode", "flush"))
         except Exception:
             pass
 
@@ -200,7 +232,7 @@ def main():
         )
         for roof in roofs:
             try:
-                members, roof_info = engine.calculate_members(roof, mode="stick")
+                members, roof_info = engine.calculate_members(roof)
             except Exception as calc_err:
                 errors.append(
                     "Roof {0} calc error: {1}".format(roof.Id.Value, calc_err)

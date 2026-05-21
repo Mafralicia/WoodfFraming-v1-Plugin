@@ -18,3 +18,8 @@ PARAM	a8f17aa4-a225-423b-82da-2c2e672f7e66	WF_SheathCutArea	AREA		1	1	Total reus
 PARAM	7ce6ae15-42a9-45ec-8806-a4dd77a3c087	WF_SheathCutSheetEq	NUMBER		1	1	Partial-sheet total converted into 32 sf sheet equivalents.	1	0
 PARAM	57bba2f1-36d3-4398-a394-0fc6b80cada4	WF_SheathTotalSheetEq	NUMBER		1	1	Full sheets plus reusable partial-sheet equivalents.	1	0
 PARAM	847a73d7-40e5-4474-b7c6-ca16f49e14da	WF_SheathCutSummary	TEXT		1	1	Compact cut-size summary for the sheathing schedule.	1	1
+PARAM	e528b80b-cc20-410a-b30c-5197825b42d1	WF_ParentId	TEXT		1	1	Parent host element ID (Wall or Roof).	1	1
+PARAM	d3c11e6d-5cc0-4966-8809-53e77f09d2cc	WF_GroupId	TEXT		1	1	Group ID of the opening or truss configuration.	1	1
+PARAM	10f27c8a-7e3e-4fb6-ba6a-360b4de09db1	WF_SupportedBy	TEXT		1	1	Indicates the member role that supports this member.	1	1
+PARAM	920364ea-58b1-419b-ab29-6b583f7ea4cb	WF_Supports	TEXT		1	1	Indicates the member roles supported by this member.	1	1
+

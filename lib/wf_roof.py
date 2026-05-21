@@ -21,8 +21,16 @@ Edge classification:
 
 import math
 import re
+import Autodesk.Revit.DB as DB
 
-from wf_geometry import FramingMember, inches_to_feet
+from wf_geometry import (
+    FramingMember,
+    inches_to_feet,
+    _safe_member_length,
+    _safe_vector,
+    _safe_rotation,
+    _get_local_axes,
+)
 from wf_config import LUMBER_ACTUAL
 from wf_host import (
     PlanarHostInfo,
@@ -663,32 +671,40 @@ class RoofFramingEngine(BaseFramingEngine):
             except Exception:
                 pass
 
-    def calculate_members(self, roof, mode="stick"):
+    def calculate_members(self, roof, mode=None):
         """Calculate framing members for a roof.
 
         Args:
             roof: Revit RoofBase element.
-            mode: "stick" for rafter framing, "truss" for truss placement.
+            mode: "stick", "simple_truss", "king_post_truss", etc.
 
         Returns:
             (members_list, roof_info) or ([], None) on failure.
         """
+        mode = mode or getattr(self.config, "roof_framing_mode", "stick")
         roof_info = analyze_roof_host(self.doc, roof, self.config)
         if roof_info is None:
             return [], None
         is_supported, support_reason, roof_type = _single_slope_support_status(
             getattr(roof_info, "planes", []) or []
         )
+        # Detailed truss mode supports gable roofs (two sloped planes with ridge)
+        if mode in ("simple_truss", "king_post_truss", "truss") and roof_type == "gable":
+            is_supported = True
+            support_reason = None
+
         try:
             roof_info.roof_type = roof_type
             roof_info.single_slope_supported = is_supported
             roof_info.single_slope_support_reason = support_reason
         except Exception:
             pass
+
         if not is_supported:
             return [], roof_info
-        if mode == "truss":
-            members = self._calc_truss_positions(roof_info)
+
+        if mode in ("simple_truss", "king_post_truss", "truss"):
+            members = self._calc_truss_positions(roof_info, mode)
         else:
             members = self._calc_stick_frame(roof_info)
         return members, roof_info
@@ -1751,7 +1767,7 @@ class RoofFramingEngine(BaseFramingEngine):
     #  Truss placement
     # ------------------------------------------------------------------
 
-    def _calc_truss_positions(self, roof_info):
+    def _calc_truss_positions(self, roof_info, mode):
         """Place trusses at OC spacing perpendicular to ridge, eave-to-eave."""
         members = []
         planes = roof_info.planes
@@ -1773,6 +1789,7 @@ class RoofFramingEngine(BaseFramingEngine):
             return members
 
         seen = set()
+        truss_index = 0
         for rs, re, pa, pb in ridge_edges:
             ridge_dir = re - rs
             ridge_len = ridge_dir.GetLength()
@@ -1801,15 +1818,316 @@ class RoofFramingEngine(BaseFramingEngine):
                     rkey = (_pt_key(foot_b), _pt_key(foot_a))
                     if key not in seen and rkey not in seen:
                         seen.add(key)
-                        m = FramingMember(FramingMember.STUD, foot_a, foot_b)
-                        m.member_type = "TRUSS"
-                        m.family_name = self.config.stud_family_name
-                        m.type_name = self.config.stud_type_name
-                        m.rotation = 0.0
-                        m.host_kind = roof_info.kind
-                        m.host_id = roof_info.element_id
-                        members.append(m)
+
+                        # Generate truss members for this line!
+                        truss_members = self._generate_truss_members(
+                            foot_a, foot_b, ridge_pt, pa, pb, ridge_unit, truss_index, roof_info, mode
+                        )
+                        members.extend(truss_members)
+                        truss_index += 1
 
                 d += spacing
 
         return members
+
+    def _generate_truss_members(self, foot_a, foot_b, ridge_pt, pa, pb, ridge_unit, truss_index, roof_info, mode):
+        """Generate bottom chord, top chords, and webs for a single truss line."""
+        # NOTE:
+        # Detailed truss mode generates BIM framing geometry only.
+        # Structural sizing and connection engineering must be verified separately.
+
+        members = []
+
+        # Get member family size info
+        family_name = self.config.stud_family_name
+        type_name = self.config.stud_type_name
+        member_width, member_depth = self._resolve_roof_member_size(family_name, type_name)
+        if member_depth <= 0.0:
+            member_depth = inches_to_feet(5.5)  # 2x6 fallback depth
+        if member_width <= 0.0:
+            member_width = inches_to_feet(1.5)  # 2x6 fallback thickness
+
+        # Define local axes of the truss
+        span_vec = DB.XYZ(foot_b.X - foot_a.X, foot_b.Y - foot_a.Y, 0.0)
+        span_len = span_vec.GetLength()
+        if span_len < 1e-4:
+            return []
+        H = span_vec.Normalize()
+
+        # Extrusion direction along the ridge
+        E = ridge_unit
+
+        # Base elevation: standard residential wood frame usually sits on eave wall plate
+        Z_eave = min(foot_a.Z, foot_b.Z)
+
+        # Geometry validation
+        if not self._validate_geometry(foot_a, foot_b, pa, pb):
+            # Fallback to standard stick member (bottom chord only or similar) if invalid for full truss
+            m = FramingMember(FramingMember.STUD, foot_a, foot_b)
+            m.member_type = "TRUSS"
+            m.family_name = family_name
+            m.type_name = type_name
+            m.rotation = 0.0
+            m.host_kind = roof_info.kind
+            m.host_id = roof_info.element_id
+            m.group_id = str(truss_index)
+            m.parent_id = str(roof_info.element_id)
+            return [m]
+
+        min_length = inches_to_feet(2.0)
+
+        # Calculate depths from roof exterior to member centerlines
+        layer_top_depth_a = self._resolve_roof_layer_top_depth(pa)
+        layer_top_depth_b = self._resolve_roof_layer_top_depth(pb)
+
+        control_depth_a = layer_top_depth_a + member_depth / 2.0
+        control_depth_b = layer_top_depth_b + member_depth / 2.0
+
+        # Center points at ridge and eaves offset down from exterior surface
+        ridge_center_a = ridge_pt - pa.normal.Multiply(control_depth_a)
+        ridge_center_b = ridge_pt - pb.normal.Multiply(control_depth_b)
+
+        foot_a_center = foot_a - pa.normal.Multiply(control_depth_a)
+        foot_b_center = foot_b - pb.normal.Multiply(control_depth_b)
+
+        # Calculate chord directions
+        dir_a = ridge_center_a - foot_a_center
+        len_a = dir_a.GetLength()
+        if len_a < 1e-4:
+            return []
+        dir_a_unit = dir_a.Normalize()
+
+        dir_b = ridge_center_b - foot_b_center
+        len_b = dir_b.GetLength()
+        if len_b < 1e-4:
+            return []
+        dir_b_unit = dir_b.Normalize()
+
+        # Bottom chord centerline elevation
+        Z_bottom_center = Z_eave + member_depth / 2.0
+
+        # Intersection of sloped top chord centerlines with horizontal bottom chord centerline
+        if abs(dir_a_unit.Z) > 1e-4:
+            t_a = (Z_bottom_center - foot_a_center.Z) / dir_a_unit.Z
+            heel_left = foot_a_center + dir_a_unit.Multiply(t_a)
+        else:
+            heel_left = foot_a_center
+
+        if abs(dir_b_unit.Z) > 1e-4:
+            t_b = (Z_bottom_center - foot_b_center.Z) / dir_b_unit.Z
+            heel_right = foot_b_center + dir_b_unit.Multiply(t_b)
+        else:
+            heel_right = foot_b_center
+
+        # Peak intersection of the two sloped top chord centerlines in the truss plane
+        u_hl = (heel_left - foot_a).DotProduct(H)
+        v_hl = heel_left.Z
+        u_dl = dir_a_unit.DotProduct(H)
+        v_dl = dir_a_unit.Z
+
+        u_hr = (heel_right - foot_a).DotProduct(H)
+        v_hr = heel_right.Z
+        u_dr = dir_b_unit.DotProduct(H)
+        v_dr = dir_b_unit.Z
+
+        det = u_dr * v_dl - u_dl * v_dr
+        if abs(det) > 1e-6:
+            num_t = u_dr * (v_hr - v_hl) - (u_hr - u_hl) * v_dr
+            t_peak = num_t / det
+            u_int = u_hl + t_peak * u_dl
+            v_int = v_hl + t_peak * v_dl
+            peak = DB.XYZ(foot_a.X + u_int * H.X, foot_a.Y + u_int * H.Y, v_int)
+        else:
+            peak = ridge_center_a.Multiply(0.5) + ridge_center_b.Multiply(0.5)
+
+        # Apply heel mode offsets
+        heel_mode = getattr(self.config, "heel_mode", "flush")
+
+        tc_left_start = heel_left
+        tc_left_end = peak
+        tc_right_start = heel_right
+        tc_right_end = peak
+
+        bc_start = heel_left
+        bc_end = heel_right
+
+        if heel_mode == "seat_cut":
+            # Shift top chords up vertically by member_depth
+            vertical_offset = DB.XYZ(0, 0, member_depth)
+            tc_left_start += vertical_offset
+            tc_left_end += vertical_offset
+            tc_right_start += vertical_offset
+            tc_right_end += vertical_offset
+        elif heel_mode == "overlap":
+            # Shift top chords laterally (along E) to overlap side-by-side
+            tc_left_start += E.Multiply(member_width)
+            tc_left_end += E.Multiply(member_width)
+            tc_right_start -= E.Multiply(member_width)
+            tc_right_end -= E.Multiply(member_width)
+
+        # Rotations for top chords in vertical plane
+        rot_left = self._calc_vertical_plane_rotation(tc_left_end - tc_left_start, E)
+        rot_right = self._calc_vertical_plane_rotation(tc_right_end - tc_right_start, E)
+        rot_bottom = self._calc_vertical_plane_rotation(bc_end - bc_start, E)
+
+        # Build Bottom Chord
+        if (bc_end - bc_start).GetLength() >= min_length:
+            bc = FramingMember(FramingMember.STUD, bc_start, bc_end)
+            bc.member_type = "TRUSS_BOTTOM_CHORD"
+            bc.family_name = family_name
+            bc.type_name = type_name
+            bc.rotation = rot_bottom
+            bc.host_kind = roof_info.kind
+            bc.host_id = roof_info.element_id
+            bc.group_id = str(truss_index)
+            bc.parent_id = str(roof_info.element_id)
+            bc.supported_by = "WALL"
+            bc.supports = ["TRUSS_TOP_CHORD"]
+            members.append(bc)
+
+        # Build Left Top Chord
+        if (tc_left_end - tc_left_start).GetLength() >= min_length:
+            tc_left = FramingMember(FramingMember.STUD, tc_left_start, tc_left_end)
+            tc_left.member_type = "TRUSS_TOP_CHORD"
+            tc_left.family_name = family_name
+            tc_left.type_name = type_name
+            tc_left.rotation = rot_left
+            tc_left.host_kind = roof_info.kind
+            tc_left.host_id = roof_info.element_id
+            tc_left.group_id = str(truss_index)
+            tc_left.parent_id = str(roof_info.element_id)
+            tc_left.supported_by = "TRUSS_BOTTOM_CHORD"
+            tc_left.supports = ["ROOF_DECK"]
+            members.append(tc_left)
+
+        # Build Right Top Chord
+        if (tc_right_end - tc_right_start).GetLength() >= min_length:
+            tc_right = FramingMember(FramingMember.STUD, tc_right_start, tc_right_end)
+            tc_right.member_type = "TRUSS_TOP_CHORD"
+            tc_right.family_name = family_name
+            tc_right.type_name = type_name
+            tc_right.rotation = rot_right
+            tc_right.host_kind = roof_info.kind
+            tc_right.host_id = roof_info.element_id
+            tc_right.group_id = str(truss_index)
+            tc_right.parent_id = str(roof_info.element_id)
+            tc_right.supported_by = "TRUSS_BOTTOM_CHORD"
+            tc_right.supports = ["ROOF_DECK"]
+            members.append(tc_right)
+
+        # Add King Post and Diagonals if king_post_truss mode
+        if mode == "king_post_truss":
+            center_u = (u_hl + u_hr) / 2.0
+            kp_pt_bottom = foot_a + H.Multiply(center_u)
+
+            kp_start_z = Z_bottom_center + member_depth / 2.0
+            kp_end_z = peak.Z - member_depth / 2.0
+
+            kp_start = DB.XYZ(kp_pt_bottom.X, kp_pt_bottom.Y, kp_start_z)
+            kp_end = DB.XYZ(kp_pt_bottom.X, kp_pt_bottom.Y, kp_end_z)
+
+            if (kp_end - kp_start).GetLength() >= min_length:
+                kp = FramingMember(FramingMember.STUD, kp_start, kp_end)
+                kp.is_column = True
+                kp.member_type = "TRUSS_KING_POST"
+                kp.family_name = family_name
+                kp.type_name = type_name
+                kp.rotation = self._calc_vertical_plane_rotation(kp_end - kp_start, E)
+                kp.host_kind = roof_info.kind
+                kp.host_id = roof_info.element_id
+                kp.group_id = str(truss_index)
+                kp.parent_id = str(roof_info.element_id)
+                kp.supported_by = "TRUSS_BOTTOM_CHORD"
+                kp.supports = ["TRUSS_TOP_CHORD"]
+                members.append(kp)
+
+                mid_left = (tc_left_start + tc_left_end).Multiply(0.5)
+                mid_right = (tc_right_start + tc_right_end).Multiply(0.5)
+
+                if (mid_left - kp_start).GetLength() >= min_length:
+                    diag_left = FramingMember(FramingMember.STUD, kp_start, mid_left)
+                    diag_left.member_type = "TRUSS_DIAGONAL"
+                    diag_left.family_name = family_name
+                    diag_left.type_name = type_name
+                    diag_left.rotation = self._calc_vertical_plane_rotation(mid_left - kp_start, E)
+                    diag_left.host_kind = roof_info.kind
+                    diag_left.host_id = roof_info.element_id
+                    diag_left.group_id = str(truss_index)
+                    diag_left.parent_id = str(roof_info.element_id)
+                    diag_left.supported_by = "TRUSS_KING_POST"
+                    diag_left.supports = ["TRUSS_TOP_CHORD"]
+                    members.append(diag_left)
+
+                if (mid_right - kp_start).GetLength() >= min_length:
+                    diag_right = FramingMember(FramingMember.STUD, kp_start, mid_right)
+                    diag_right.member_type = "TRUSS_DIAGONAL"
+                    diag_right.family_name = family_name
+                    diag_right.type_name = type_name
+                    diag_right.rotation = self._calc_vertical_plane_rotation(mid_right - kp_start, E)
+                    diag_right.host_kind = roof_info.kind
+                    diag_right.host_id = roof_info.element_id
+                    diag_right.group_id = str(truss_index)
+                    diag_right.parent_id = str(roof_info.element_id)
+                    diag_right.supported_by = "TRUSS_KING_POST"
+                    diag_right.supports = ["TRUSS_TOP_CHORD"]
+                    members.append(diag_right)
+
+        # Debug geometry curves if enabled
+        if getattr(self, "DEBUG_GEOMETRY", False):
+            self._draw_debug_line(foot_a, foot_b)
+
+        return members
+
+    def _draw_debug_line(self, p1, p2):
+        """Draw a temporary model curve for debugging geometry."""
+        try:
+            from Autodesk.Revit.DB import Line, Plane, SketchPlane
+            if p1.DistanceTo(p2) < 1e-4:
+                return
+            line = Line.CreateBound(p1, p2)
+            v = p2 - p1
+            normal = v.CrossProduct(DB.XYZ.BasisZ)
+            if normal.GetLength() < 1e-4:
+                normal = v.CrossProduct(DB.XYZ.BasisX)
+            if normal.GetLength() < 1e-4:
+                return
+            normal = normal.Normalize()
+            plane = Plane.CreateByNormalAndOrigin(normal, p1)
+            sp = SketchPlane.Create(self.doc, plane)
+            self.doc.Create.NewModelCurve(line, sp)
+        except Exception:
+            pass
+
+    def _calc_vertical_plane_rotation(self, member_dir, E):
+        """Calculate the cross-section rotation for a member lying in the vertical plane.
+
+        The width axis should align with the extrusion direction E.
+        The depth direction is perpendicular to both the member direction and E.
+        """
+        member_dir_unit = _normalize(member_dir)
+        if member_dir_unit is None:
+            return 0.0
+        desired_up = E.CrossProduct(member_dir_unit)
+        if desired_up.GetLength() < 1e-6:
+            return 0.0
+        desired_up = desired_up.Normalize()
+        if desired_up.Z < 0.0:
+            desired_up = -desired_up
+        return _rotation_from_up(member_dir_unit, desired_up)
+
+    def _validate_geometry(self, foot_a, foot_b, pa, pb):
+        """Ensure geometric limits for detailed truss execution."""
+        span_vec = DB.XYZ(foot_b.X - foot_a.X, foot_b.Y - foot_a.Y, 0.0)
+        if span_vec.GetLength() < 4.0:  # Minimum span 4 feet for truss
+            return False
+
+        # Check slopes
+        for plane in (pa, pb):
+            cos_theta = plane.normal.Z
+            if cos_theta > 0.999:  # Almost flat
+                return False
+            sin_theta = math.sqrt(1.0 - cos_theta * cos_theta)
+            slope = sin_theta / cos_theta
+            if slope < 0.05:  # less than ~5% slope
+                return False
+        return True

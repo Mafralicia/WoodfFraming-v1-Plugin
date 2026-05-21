@@ -87,6 +87,10 @@ class FramingMember(object):
         self.host_kind = None
         self.host_id = None
         self.layer_index = None
+        self.parent_id = None
+        self.group_id = None
+        self.supported_by = None
+        self.supports = []
 
 
 def analyze_wall(doc, wall):
@@ -695,3 +699,93 @@ def _get_wall_location_line(wall):
         return System.Enum.ToObject(WallLocationLine, raw_value)
     except Exception:
         return None
+
+
+# ======================================================================
+#  Safety and Coordinate Utilities
+# ======================================================================
+
+def _safe_member_length(length):
+    """Return True if length is >= MIN_MEMBER_LENGTH (2 inches)."""
+    return length >= inches_to_feet(2.0)
+
+
+def _safe_vector(vector, fallback=None):
+    """Safely normalize a vector, returning a fallback if too short."""
+    from Autodesk.Revit.DB import XYZ
+    if vector is None:
+        return fallback or XYZ.BasisZ
+    l = vector.GetLength()
+    if l < 1e-9:
+        return fallback or XYZ.BasisZ
+    return vector.Multiply(1.0 / l)
+
+
+def _safe_rotation(rotation):
+    """Clamp and normalize rotation within [0, 2*pi)."""
+    if rotation is None or math.isnan(rotation) or math.isinf(rotation):
+        return 0.0
+    two_pi = 2.0 * math.pi
+    rot = float(rotation) % two_pi
+    if rot < 0.0:
+        rot += two_pi
+    return rot
+
+
+def _get_local_axes(host_info):
+    """Return the local axes (longitudinal, lateral, vertical) for the host."""
+    from Autodesk.Revit.DB import XYZ
+    if host_info is None:
+        return (XYZ.BasisX, XYZ.BasisY, XYZ.BasisZ)
+    if hasattr(host_info, "direction") and hasattr(host_info, "normal"):
+        return (host_info.direction, host_info.normal, XYZ.BasisZ)
+    if hasattr(host_info, "plane"):
+        plane = host_info.plane
+        return (plane.x_axis, plane.y_axis, plane.normal)
+    return (XYZ.BasisX, XYZ.BasisY, XYZ.BasisZ)
+
+
+def _normalize_vector(v):
+    l = v.GetLength()
+    if l < 1e-9:
+        return None
+    return v.Multiply(1.0 / l)
+
+
+def _project_perpendicular(vector, axis):
+    axis_unit = _normalize_vector(axis)
+    if axis_unit is None:
+        return None
+    return vector - axis_unit.Multiply(vector.DotProduct(axis_unit))
+
+
+def _beam_reference_up(member_dir):
+    from Autodesk.Revit.DB import XYZ
+    reference_up = _normalize_vector(_project_perpendicular(XYZ.BasisZ, member_dir))
+    if reference_up is not None:
+        return reference_up
+    return _normalize_vector(_project_perpendicular(XYZ.BasisX, member_dir))
+
+
+def _signed_angle_about(axis, start_vec, end_vec):
+    axis_unit = _normalize_vector(axis)
+    start_unit = _normalize_vector(start_vec)
+    end_unit = _normalize_vector(end_vec)
+    if axis_unit is None or start_unit is None or end_unit is None:
+        return 0.0
+
+    cross = start_unit.CrossProduct(end_unit)
+    sin_value = axis_unit.DotProduct(cross)
+    cos_value = max(-1.0, min(1.0, start_unit.DotProduct(end_unit)))
+    return math.atan2(sin_value, cos_value)
+
+
+def _rotation_from_up(member_dir, desired_up):
+    """Calculate cross-section rotation around member_dir matching desired_up."""
+    if desired_up is None:
+        return 0.0
+    reference_up = _beam_reference_up(member_dir)
+    desired_up = _normalize_vector(_project_perpendicular(desired_up, member_dir))
+    if reference_up is None or desired_up is None:
+        return 0.0
+    return _signed_angle_about(member_dir, reference_up, desired_up)

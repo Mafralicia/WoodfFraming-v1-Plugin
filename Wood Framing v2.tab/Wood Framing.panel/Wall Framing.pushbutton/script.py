@@ -102,6 +102,14 @@ class WallFraming20Dialog(WPFWindow):
         self.result_config = None
         self.Close()
 
+    def _get_combo_value(self, combo):
+        item = combo.SelectedItem
+        if not item:
+            return None
+        if hasattr(item, "Content"):
+            return str(item.Content)
+        return str(item)
+
     def _build_config(self):
         config = FramingConfig()
 
@@ -153,6 +161,14 @@ class WallFraming20Dialog(WPFWindow):
         )
         config.clean_existing_wall_members = bool(self.chk_clean_existing.IsChecked)
         config.track_members = True
+
+        sill_val = self._get_combo_value(self.cb_sill_mode)
+        if sill_val:
+            config.sill_mode = sill_val
+        jack_val = self._get_combo_value(self.cb_jack_strategy)
+        if jack_val:
+            config.jack_strategy = jack_val
+
         return config
 
     def _save_last(self):
@@ -172,6 +188,8 @@ class WallFraming20Dialog(WPFWindow):
             "cripple": bool(self.chk_cripple_studs.IsChecked),
             "support_top": bool(self.chk_support_top.IsChecked),
             "clean_existing": bool(self.chk_clean_existing.IsChecked),
+            "sill_mode": self._get_combo_value(self.cb_sill_mode),
+            "jack_strategy": self._get_combo_value(self.cb_jack_strategy),
         }
         try:
             cfg_dir = os.path.dirname(_CFG_PATH)
@@ -214,6 +232,9 @@ class WallFraming20Dialog(WPFWindow):
         self.chk_support_top.IsChecked = bool(data.get("support_top", False))
         self.chk_clean_existing.IsChecked = True
 
+        self._select_combo_value(self.cb_sill_mode, data.get("sill_mode"))
+        self._select_combo_value(self.cb_jack_strategy, data.get("jack_strategy"))
+
     @staticmethod
     def _select_if_present(combo, value):
         if not value:
@@ -221,6 +242,19 @@ class WallFraming20Dialog(WPFWindow):
         try:
             for item in combo.Items:
                 if str(item) == str(value):
+                    combo.SelectedItem = item
+                    return
+        except Exception:
+            pass
+
+    @staticmethod
+    def _select_combo_value(combo, value):
+        if not value:
+            return
+        try:
+            for item in combo.Items:
+                item_val = str(item.Content) if hasattr(item, "Content") else str(item)
+                if item_val == str(value):
                     combo.SelectedItem = item
                     return
         except Exception:

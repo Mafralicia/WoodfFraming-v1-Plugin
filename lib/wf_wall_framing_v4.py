@@ -29,7 +29,9 @@ from wf_placement import BaseFramingEngine
 
 
 ENGINE_NAME = "wall-framing-4.0-cavity"
-MIN_MEMBER_LENGTH = inches_to_feet(1.0)
+MIN_MEMBER_LENGTH = inches_to_feet(2.0)
+MIN_OPENING_WIDTH = inches_to_feet(6.0)
+MIN_CRIPPLE_HEIGHT = inches_to_feet(3.0)
 PLATE_THICKNESS = inches_to_feet(1.5)
 STUD_THICKNESS = inches_to_feet(1.5)
 DEFAULT_LUMBER_DEPTH = inches_to_feet(3.5)
@@ -56,7 +58,7 @@ OPENING_FRAME_MEMBER_TYPES = set([
 
 
 class WallCavityOpeningV4(object):
-    def __init__(self, left, right, sill_height, head_height, is_window, source):
+    def __init__(self, left, right, sill_height, head_height, is_window, source, element=None):
         self.left_edge = max(0.0, float(left))
         self.right_edge = max(self.left_edge, float(right))
         self.sill_height = max(0.0, float(sill_height))
@@ -64,6 +66,8 @@ class WallCavityOpeningV4(object):
         self.is_window = bool(is_window)
         self.is_door = not self.is_window
         self.source = source
+        self.element = element
+        self.element_id = element.Id if element is not None else None
         self.distance_along_wall = (self.left_edge + self.right_edge) * 0.5
 
 
@@ -143,6 +147,12 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         members.extend(self._wall_shape_members(host, occupied))
         members.extend(self._opening_members(host, occupied))
         members.extend(self._infill_members(host, occupied))
+        
+        # Set parent_id for all generated members
+        for member in members:
+            if member is not None:
+                member.parent_id = host.element_id
+
         host.audit["member_count"] = len(members)
         return members, host
 
@@ -566,6 +576,7 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                         end_d,
                         base_z,
                         "insert",
+                        element=elem,
                     )
         except Exception:
             pass
@@ -616,6 +627,7 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                 end_d,
                 base_z,
                 "curtain",
+                element=elem,
             )
 
         category = getattr(elem, "Category", None)
@@ -645,6 +657,7 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
             end_d,
             base_z,
             "family",
+            element=elem,
         )
 
     # ------------------------------------------------------------------
@@ -805,6 +818,30 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
             return "no usable vertical span at side stud d"
         return "member factory returned no side stud"
 
+    def _validate_geometry(self, opening, host, header_depth):
+        """Validate geometry of the opening and determine the safe sill_mode and jack_strategy."""
+        if opening.right_edge - opening.left_edge < MIN_OPENING_WIDTH:
+            return "standard", "continuous"
+
+        sill_mode = getattr(self.config, "sill_mode", "standard")
+        jack_strategy = getattr(self.config, "jack_strategy", "continuous")
+
+        if not opening.is_window or opening.sill_height <= self._stud_bottom():
+            return "standard", jack_strategy
+
+        if sill_mode == "engineered":
+            sill_stack_bottom = opening.sill_height - 2.0 * PLATE_THICKNESS - header_depth
+        elif sill_mode == "reinforced":
+            sill_stack_bottom = opening.sill_height - 2.0 * PLATE_THICKNESS
+        else:
+            sill_stack_bottom = opening.sill_height - PLATE_THICKNESS
+
+        limit = self._stud_bottom() + MIN_MEMBER_LENGTH
+        if sill_stack_bottom < limit:
+            return "standard", "continuous"
+
+        return sill_mode, jack_strategy
+
     def _opening_members(self, host, occupied):
         members = []
         header_family = self.config.header_family_name or self.config.stud_family_name
@@ -821,31 +858,88 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
             if right - left < MIN_MEMBER_LENGTH:
                 continue
 
+            # Resolve strategy modes for this specific opening
+            resolved_sill, resolved_jack = self._validate_geometry(opening, host, header_depth)
+
+            # 1. King Studs
             if getattr(self.config, "include_king_studs", True):
                 for d in (left - STUD_THICKNESS * 1.5, right + STUD_THICKNESS * 1.5):
                     if d <= 0.0 or d >= host.length or _near(d, occupied, OPENING_STUD_COLLISION_TOL):
                         continue
                     member = self._vertical_member_at_d(host, "KING_STUD", d, None, None, False)
                     if member is not None:
+                        member.parent_id = host.element_id
+                        member.group_id = opening.element_id
+                        member.supports = ["HEADER_BOTTOM_PLATE", "SILL_PLATE"]
                         members.append(member)
                         occupied.add(round(d, 4))
 
+            # Calculate sill stack bottom and span
+            sill_stack_bottom = _get_sill_stack_bottom(opening, resolved_sill, header_depth)
+
+            # 2. Jack Studs
             if getattr(self.config, "include_jack_studs", True):
                 for d in (left - STUD_THICKNESS * 0.5, right + STUD_THICKNESS * 0.5):
                     if d <= 0.0 or d >= host.length or _near(d, occupied, OPENING_STUD_COLLISION_TOL):
                         continue
-                    member = self._vertical_member_at_d(
-                        host,
-                        "JACK_STUD",
-                        d,
-                        None,
-                        host.base_elevation + opening.head_height,
-                        False,
-                    )
-                    if member is not None:
-                        members.append(member)
-                        occupied.add(round(d, 4))
 
+                    if resolved_jack == "split":
+                        # Lower Jack
+                        lower_start = host.base_elevation + self._stud_bottom()
+                        lower_end = host.base_elevation + sill_stack_bottom
+                        if lower_end - lower_start >= MIN_MEMBER_LENGTH:
+                            lower_jack = self._vertical_member_at_d(
+                                host,
+                                "JACK_STUD",
+                                d,
+                                lower_start,
+                                lower_end,
+                                False,
+                            )
+                            if lower_jack is not None:
+                                lower_jack.parent_id = host.element_id
+                                lower_jack.group_id = opening.element_id
+                                lower_jack.supports = ["SILL_PLATE"]
+                                members.append(lower_jack)
+
+                        # Upper Jack
+                        upper_start = host.base_elevation + opening.sill_height
+                        upper_end = host.base_elevation + opening.head_height
+                        if upper_end - upper_start >= MIN_MEMBER_LENGTH:
+                            upper_jack = self._vertical_member_at_d(
+                                host,
+                                "JACK_STUD",
+                                d,
+                                upper_start,
+                                upper_end,
+                                False,
+                            )
+                            if upper_jack is not None:
+                                upper_jack.parent_id = host.element_id
+                                upper_jack.group_id = opening.element_id
+                                upper_jack.supported_by = "SILL_PLATE"
+                                upper_jack.supports = ["HEADER_BOTTOM_PLATE"]
+                                members.append(upper_jack)
+
+                        occupied.add(round(d, 4))
+                    else:
+                        # Continuous Jack
+                        member = self._vertical_member_at_d(
+                            host,
+                            "JACK_STUD",
+                            d,
+                            None,
+                            host.base_elevation + opening.head_height,
+                            False,
+                        )
+                        if member is not None:
+                            member.parent_id = host.element_id
+                            member.group_id = opening.element_id
+                            member.supports = ["HEADER_BOTTOM_PLATE"]
+                            members.append(member)
+                            occupied.add(round(d, 4))
+
+            # 3. Header Stack
             span_left = max(0.0, left - STUD_THICKNESS)
             span_right = min(host.length, right + STUD_THICKNESS)
             header_stack_top = host.base_elevation + opening.head_height
@@ -857,20 +951,23 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                 )
                 start = host.point_at_abs(span_left, bottom_plate_center)
                 end = host.point_at_abs(span_right, bottom_plate_center)
-                members.append(
-                    self._member_from_points(
-                        host,
-                        "HEADER_BOTTOM_PLATE",
-                        start,
-                        end,
-                        plate_family,
-                        plate_type,
-                        False,
-                        PLATE_ROTATION,
-                        PLATE_THICKNESS,
-                        plate_depth,
-                    )
+                bottom_plate_member = self._member_from_points(
+                    host,
+                    "HEADER_BOTTOM_PLATE",
+                    start,
+                    end,
+                    plate_family,
+                    plate_type,
+                    False,
+                    PLATE_ROTATION,
+                    PLATE_THICKNESS,
+                    plate_depth,
                 )
+                if bottom_plate_member is not None:
+                    bottom_plate_member.parent_id = host.element_id
+                    bottom_plate_member.group_id = opening.element_id
+                    bottom_plate_member.supports = ["HEADER"]
+                    members.append(bottom_plate_member)
 
                 header_bottom = host.base_elevation + opening.head_height + PLATE_THICKNESS
                 header_center = header_bottom + header_depth * 0.5
@@ -880,8 +977,108 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                         header_width):
                     start = host.point_at_abs(span_left, header_center, lateral)
                     end = host.point_at_abs(span_right, header_center, lateral)
-                    members.append(
-                        self._member_from_points(
+                    header_member = self._member_from_points(
+                        host,
+                        "HEADER",
+                        start,
+                        end,
+                        header_family,
+                        header_type,
+                        False,
+                        HEADER_ROTATION,
+                        header_depth,
+                        header_width,
+                    )
+                    if header_member is not None:
+                        header_member.parent_id = host.element_id
+                        header_member.group_id = opening.element_id
+                        header_member.supported_by = "HEADER_BOTTOM_PLATE"
+                        header_member.supports = ["HEADER_TOP_PLATE"]
+                        members.append(header_member)
+
+                header_top = header_bottom + header_depth
+                top_plate_center = header_top + PLATE_THICKNESS * 0.5
+                start = host.point_at_abs(span_left, top_plate_center)
+                end = host.point_at_abs(span_right, top_plate_center)
+                top_plate_member = self._member_from_points(
+                    host,
+                    "HEADER_TOP_PLATE",
+                    start,
+                    end,
+                    plate_family,
+                    plate_type,
+                    False,
+                    PLATE_ROTATION,
+                    PLATE_THICKNESS,
+                    plate_depth,
+                )
+                if top_plate_member is not None:
+                    top_plate_member.parent_id = host.element_id
+                    top_plate_member.group_id = opening.element_id
+                    top_plate_member.supported_by = "HEADER"
+                    top_plate_member.supports = ["CRIPPLE_STUD"]
+                    members.append(top_plate_member)
+                header_stack_top = header_top + PLATE_THICKNESS
+
+            # 4. Top Cripples
+            if getattr(self.config, "include_cripple_studs", True):
+                top_bound = _top_bound_at_d(host.outer_loop, (left + right) * 0.5)
+                if top_bound is not None:
+                    top_z = top_bound - self._top_plate_stack()
+                    if header_stack_top < top_z - MIN_MEMBER_LENGTH:
+                        cripple_members = self._cripples(host, left, right, header_stack_top, top_z, occupied)
+                        for cm in cripple_members:
+                            cm.parent_id = host.element_id
+                            cm.group_id = opening.element_id
+                            cm.supported_by = "HEADER_TOP_PLATE"
+                        members.extend(cripple_members)
+
+            # 5. Window Sill Plate Stack & Under Cripples
+            if opening.is_window and opening.sill_height > self._stud_bottom():
+                # Determine horizontal span based on resolved_jack strategy
+                if resolved_jack == "split":
+                    sill_span_left = span_left
+                    sill_span_right = span_right
+                else:
+                    sill_span_left = left
+                    sill_span_right = right
+
+                # Place appropriate plate layout based on resolved_sill mode:
+                # standard, reinforced, engineered
+                if resolved_sill == "engineered":
+                    # Engineered: Top sill plate, header plies, bottom sill plate
+                    # Top sill plate
+                    top_sill_center = host.base_elevation + opening.sill_height - PLATE_THICKNESS * 0.5
+                    start = host.point_at_abs(sill_span_left, top_sill_center)
+                    end = host.point_at_abs(sill_span_right, top_sill_center)
+                    tsm = self._member_from_points(
+                        host,
+                        "SILL_PLATE",
+                        start,
+                        end,
+                        plate_family,
+                        plate_type,
+                        False,
+                        PLATE_ROTATION,
+                        PLATE_THICKNESS,
+                        plate_depth,
+                    )
+                    if tsm is not None:
+                        tsm.parent_id = host.element_id
+                        tsm.group_id = opening.element_id
+                        tsm.supported_by = "HEADER"
+                        members.append(tsm)
+
+                    # Header plies
+                    header_bottom = host.base_elevation + opening.sill_height - PLATE_THICKNESS - header_depth
+                    header_center = header_bottom + header_depth * 0.5
+                    for lateral in _header_ply_lateral_offsets(
+                            host,
+                            int(getattr(self.config, "header_count", MIN_HEADER_PLY_COUNT)),
+                            header_width):
+                        start = host.point_at_abs(sill_span_left, header_center, lateral)
+                        end = host.point_at_abs(sill_span_right, header_center, lateral)
+                        hm = self._member_from_points(
                             host,
                             "HEADER",
                             start,
@@ -893,15 +1090,19 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                             header_depth,
                             header_width,
                         )
-                    )
-                header_top = header_bottom + header_depth
-                top_plate_center = header_top + PLATE_THICKNESS * 0.5
-                start = host.point_at_abs(span_left, top_plate_center)
-                end = host.point_at_abs(span_right, top_plate_center)
-                members.append(
-                    self._member_from_points(
+                        if hm is not None:
+                            hm.parent_id = host.element_id
+                            hm.group_id = opening.element_id
+                            hm.supported_by = "SILL_PLATE"
+                            members.append(hm)
+
+                    # Bottom sill plate
+                    bot_sill_center = header_bottom - PLATE_THICKNESS * 0.5
+                    start = host.point_at_abs(sill_span_left, bot_sill_center)
+                    end = host.point_at_abs(sill_span_right, bot_sill_center)
+                    bsm = self._member_from_points(
                         host,
-                        "HEADER_TOP_PLATE",
+                        "SILL_PLATE",
                         start,
                         end,
                         plate_family,
@@ -911,51 +1112,94 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                         PLATE_THICKNESS,
                         plate_depth,
                     )
-                )
-                header_stack_top = header_top + PLATE_THICKNESS
+                    if bsm is not None:
+                        bsm.parent_id = host.element_id
+                        bsm.group_id = opening.element_id
+                        bsm.supports = ["CRIPPLE_STUD"]
+                        members.append(bsm)
 
-            if getattr(self.config, "include_cripple_studs", True):
-                top_bound = _top_bound_at_d(host.outer_loop, (left + right) * 0.5)
-                if top_bound is not None:
-                    top_z = top_bound - self._top_plate_stack()
-                    if header_stack_top < top_z - MIN_MEMBER_LENGTH:
-                        members.extend(
-                            self._cripples(host, left, right, header_stack_top, top_z, occupied)
-                        )
-
-            if opening.is_window and opening.sill_height > self._stud_bottom():
-                sill_center = host.base_elevation + opening.sill_height - PLATE_THICKNESS * 0.5
-                start = host.point_at_abs(left, sill_center)
-                end = host.point_at_abs(right, sill_center)
-                members.append(
-                    self._member_from_points(
+                elif resolved_sill == "reinforced":
+                    # Reinforced: Double flat sill plates
+                    # Top sill plate
+                    top_sill_center = host.base_elevation + opening.sill_height - PLATE_THICKNESS * 0.5
+                    start = host.point_at_abs(sill_span_left, top_sill_center)
+                    end = host.point_at_abs(sill_span_right, top_sill_center)
+                    tsm = self._member_from_points(
                         host,
                         "SILL_PLATE",
                         start,
                         end,
-                        self.config.bottom_plate_family_name or self.config.stud_family_name,
-                        self.config.bottom_plate_type_name or self.config.stud_type_name,
+                        plate_family,
+                        plate_type,
                         False,
                         PLATE_ROTATION,
                         PLATE_THICKNESS,
-                        self._wall_member_depth(
-                            host,
-                            self.config.bottom_plate_family_name or self.config.stud_family_name,
-                            self.config.bottom_plate_type_name or self.config.stud_type_name,
-                            False,
-                        ),
+                        plate_depth,
                     )
-                )
+                    if tsm is not None:
+                        tsm.parent_id = host.element_id
+                        tsm.group_id = opening.element_id
+                        members.append(tsm)
+
+                    # Bottom sill plate
+                    bot_sill_center = host.base_elevation + opening.sill_height - PLATE_THICKNESS * 1.5
+                    start = host.point_at_abs(sill_span_left, bot_sill_center)
+                    end = host.point_at_abs(sill_span_right, bot_sill_center)
+                    bsm = self._member_from_points(
+                        host,
+                        "SILL_PLATE",
+                        start,
+                        end,
+                        plate_family,
+                        plate_type,
+                        False,
+                        PLATE_ROTATION,
+                        PLATE_THICKNESS,
+                        plate_depth,
+                    )
+                    if bsm is not None:
+                        bsm.parent_id = host.element_id
+                        bsm.group_id = opening.element_id
+                        bsm.supports = ["CRIPPLE_STUD"]
+                        members.append(bsm)
+
+                else:
+                    # Standard: Single flat sill plate
+                    sill_center = host.base_elevation + opening.sill_height - PLATE_THICKNESS * 0.5
+                    start = host.point_at_abs(sill_span_left, sill_center)
+                    end = host.point_at_abs(sill_span_right, sill_center)
+                    sm = self._member_from_points(
+                        host,
+                        "SILL_PLATE",
+                        start,
+                        end,
+                        plate_family,
+                        plate_type,
+                        False,
+                        PLATE_ROTATION,
+                        PLATE_THICKNESS,
+                        plate_depth,
+                    )
+                    if sm is not None:
+                        sm.parent_id = host.element_id
+                        sm.group_id = opening.element_id
+                        sm.supports = ["CRIPPLE_STUD"]
+                        members.append(sm)
+
+                # Under-sill cripples
                 if getattr(self.config, "include_cripple_studs", True):
                     bottom_z = _bottom_bound_at_d(host.outer_loop, (left + right) * 0.5)
                     if bottom_z is None:
                         bottom_z = host.base_elevation
                     bottom_z += self._stud_bottom()
-                    top_z = host.base_elevation + opening.sill_height - PLATE_THICKNESS
+                    top_z = host.base_elevation + sill_stack_bottom
                     if top_z > bottom_z + MIN_MEMBER_LENGTH:
-                        members.extend(
-                            self._cripples(host, left, right, bottom_z, top_z, occupied)
-                        )
+                        cripple_members = self._cripples(host, left, right, bottom_z, top_z, occupied)
+                        for cm in cripple_members:
+                            cm.parent_id = host.element_id
+                            cm.group_id = opening.element_id
+                            cm.supported_by = "SILL_PLATE"
+                        members.extend(cripple_members)
 
         return [member for member in members if member is not None]
 
@@ -976,13 +1220,24 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
 
         family = self.config.bottom_plate_family_name or self.config.stud_family_name
         type_name = self.config.bottom_plate_type_name or self.config.stud_type_name
+        
+        header_family = self.config.header_family_name or self.config.stud_family_name
+        header_type = self.config.header_type_name or self.config.stud_type_name
+        header_depth = self._header_depth(header_family, header_type)
+
         z_abs = host.base_elevation + self._stud_bottom() + interval
         max_top = max(z for _, z in host.outer_loop) - self._top_plate_stack()
         while z_abs < max_top - PLATE_THICKNESS:
             intervals = _horizontal_intervals(host.outer_loop, host.opening_loops, z_abs)
             intervals = _subtract_intervals(
                 intervals,
-                _opening_gaps_at_z(host.openings, z_abs - host.base_elevation),
+                _opening_gaps_at_z(
+                    host.openings,
+                    z_abs - host.base_elevation,
+                    self.config,
+                    header_depth,
+                    self._stud_bottom()
+                ),
             )
             for start_d, end_d in intervals:
                 if end_d - start_d < MIN_MEMBER_LENGTH:
@@ -1680,7 +1935,7 @@ def _opening_from_loop(loop, length, base_z, source):
 
 
 def _opening_from_abs_span(left_abs, right_abs, sill_abs, head_abs,
-                           start_d, end_d, base_z, source):
+                           start_d, end_d, base_z, source, element=None):
     length = max(0.0, end_d - start_d)
     left = max(0.0, left_abs - start_d)
     right = min(length, right_abs - start_d)
@@ -1695,6 +1950,7 @@ def _opening_from_abs_span(left_abs, right_abs, sill_abs, head_abs,
         head_abs - base_z,
         sill_abs > base_z + PLATE_THICKNESS * 2.0,
         source,
+        element=element,
     )
 
 
@@ -1730,6 +1986,7 @@ def _opening_from_element_bbox(element, origin, direction, start_d, end_d,
         end_d,
         base_z,
         source,
+        element=element,
     )
 
 
@@ -1770,6 +2027,9 @@ def _merge_openings(hosted, face, length):
                     existing.head_height = max(existing.head_height, opening.head_height)
                     existing.is_window = existing.is_window and opening.is_window
                     existing.is_door = not existing.is_window
+                    if not existing.element and opening.element:
+                        existing.element = opening.element
+                        existing.element_id = opening.element_id
                     break
             if not duplicate:
                 merged.append(
@@ -1780,6 +2040,7 @@ def _merge_openings(hosted, face, length):
                         opening.head_height,
                         opening.is_window,
                         opening.source,
+                        element=opening.element,
                     )
                 )
     merged.sort(key=lambda item: item.left_edge)
@@ -1819,10 +2080,37 @@ def _door_gaps_for_segment(host, segment):
     return gaps
 
 
-def _opening_gaps_at_z(openings, z_height):
+def _get_sill_stack_bottom(opening, resolved_sill, header_depth):
+    if resolved_sill == "engineered":
+        return opening.sill_height - 2.0 * PLATE_THICKNESS - header_depth
+    elif resolved_sill == "reinforced":
+        return opening.sill_height - 2.0 * PLATE_THICKNESS
+    else: # standard
+        return opening.sill_height - PLATE_THICKNESS
+
+
+def _opening_gaps_at_z(openings, z_height, config, header_depth, stud_bottom):
     gaps = []
     for opening in openings:
-        if opening.sill_height - GEOM_TOL <= z_height <= opening.head_height + GEOM_TOL:
+        sill_mode = getattr(config, "sill_mode", "standard")
+        if opening.is_window and opening.sill_height > stud_bottom:
+            if sill_mode == "engineered":
+                sill_stack_bottom = opening.sill_height - 2.0 * PLATE_THICKNESS - header_depth
+            elif sill_mode == "reinforced":
+                sill_stack_bottom = opening.sill_height - 2.0 * PLATE_THICKNESS
+            else:
+                sill_stack_bottom = opening.sill_height - PLATE_THICKNESS
+
+            # Sill guard override check
+            limit = stud_bottom + MIN_MEMBER_LENGTH
+            if sill_stack_bottom < limit:
+                sill_stack_bottom = opening.sill_height - PLATE_THICKNESS
+        else:
+            sill_stack_bottom = 0.0
+
+        header_stack_top = opening.head_height + 2.0 * PLATE_THICKNESS + header_depth
+
+        if sill_stack_bottom - GEOM_TOL <= z_height <= header_stack_top + GEOM_TOL:
             gaps.append((opening.left_edge, opening.right_edge))
     return gaps
 

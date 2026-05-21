@@ -28,5 +28,10 @@
   "header_type_name": "2x6", 
   "stud_family_name": "Dimension Lumber", 
   "include_cripple_studs": true, 
-  "top_plate_family_name": "Dimension Lumber"
+  "top_plate_family_name": "Dimension Lumber",
+  "sill_mode": "standard",
+  "jack_strategy": "continuous",
+  "heel_mode": "flush",
+  "truss_style": "king_post",
+  "roof_framing_mode": "stick"
 }
