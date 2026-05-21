@@ -28,6 +28,8 @@ class WallInfo(object):
         self.direction = None       # XYZ unit vector along wall
         self.normal = None          # XYZ wall face normal
         self.length = 0.0           # feet
+        self.raw_curve = None       # GeometryCurve representing raw location line
+        self.framing_curve = None   # GeometryCurve representing framing center line
         self.height = 0.0           # feet (nominal / unconnected)
         self.width = 0.0            # feet
         self.base_offset = 0.0      # feet from level
@@ -135,6 +137,11 @@ def analyze_wall(doc, wall):
     info.normal = safe_wall_normal(wall, info.direction)
     if info.normal is None:
         return None
+
+    # Initialize raw and framing curves
+    info.raw_curve = GeometryCurve(info.start_point, info.end_point, info.direction, info.normal)
+    info.framing_curve = info.raw_curve
+
 
     # Wall dimensions
     from Autodesk.Revit.DB import BuiltInParameter
@@ -789,3 +796,104 @@ def _rotation_from_up(member_dir, desired_up):
     if reference_up is None or desired_up is None:
         return 0.0
     return _signed_angle_about(member_dir, reference_up, desired_up)
+
+
+class GeometryCurve(object):
+    """Represents a straight 3D line segment with local properties."""
+
+    def __init__(self, start_point, end_point, direction=None, normal=None):
+        self.start_point = start_point
+        self.end_point = end_point
+
+        dx = end_point.X - start_point.X
+        dy = end_point.Y - start_point.Y
+        dz = end_point.Z - start_point.Z
+        self.length = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if self.length > 1e-9:
+            from Autodesk.Revit.DB import XYZ
+            self.direction = direction if direction is not None else XYZ(dx / self.length, dy / self.length, dz / self.length)
+        else:
+            from Autodesk.Revit.DB import XYZ
+            self.direction = direction if direction is not None else XYZ(1.0, 0.0, 0.0)
+            self.length = 0.0
+
+        if normal is not None:
+            self.normal = normal
+        else:
+            from Autodesk.Revit.DB import XYZ
+            self.normal = XYZ(-self.direction.Y, self.direction.X, 0.0)
+            l = self.normal.GetLength()
+            if l > 1e-9:
+                self.normal = self.normal.Multiply(1.0 / l)
+
+    def point_at(self, distance_along, lateral_offset=0.0):
+        """Get 3D point at distance along curve and lateral offset."""
+        from Autodesk.Revit.DB import XYZ
+        x = self.start_point.X + self.direction.X * distance_along + self.normal.X * lateral_offset
+        y = self.start_point.Y + self.direction.Y * distance_along + self.normal.Y * lateral_offset
+        z = self.start_point.Z + self.direction.Z * distance_along + self.normal.Z * lateral_offset
+        return XYZ(x, y, z)
+
+    def project(self, point):
+        """Project point onto the infinite curve line.
+        Returns:
+            dist_along: distance along the curve from start_point (can be outside [0, length])
+            perp_dist: perpendicular distance from the line
+            proj_point: XYZ of projection on the line
+        """
+        dx = point.X - self.start_point.X
+        dy = point.Y - self.start_point.Y
+        dz = point.Z - self.start_point.Z
+
+        dist_along = dx * self.direction.X + dy * self.direction.Y + dz * self.direction.Z
+        proj_point = self.point_at(dist_along)
+
+        pdx = point.X - proj_point.X
+        pdy = point.Y - proj_point.Y
+        pdz = point.Z - proj_point.Z
+        perp_dist = math.sqrt(pdx * pdx + pdy * pdy + pdz * pdz)
+
+        return dist_along, perp_dist, proj_point
+
+
+class LocalFrame(object):
+    """Tracks a 3D coordinate system at a local origin with longitudinal, lateral, and vertical unit axes."""
+
+    def __init__(self, origin, x_axis, y_axis, z_axis):
+        self.origin = origin
+        self.x_axis = x_axis
+        self.y_axis = y_axis
+        self.z_axis = z_axis
+
+    def to_world(self, local_point):
+        """Convert local coordinates (lx, ly, lz) to world coordinates."""
+        try:
+            lx, ly, lz = local_point.X, local_point.Y, local_point.Z
+        except Exception:
+            lx, ly, lz = local_point[0], local_point[1], local_point[2]
+
+        x = self.origin.X + self.x_axis.X * lx + self.y_axis.X * ly + self.z_axis.X * lz
+        y = self.origin.Y + self.x_axis.Y * lx + self.y_axis.Y * ly + self.z_axis.Y * lz
+        z = self.origin.Z + self.x_axis.Z * lx + self.y_axis.Z * ly + self.z_axis.Z * lz
+        from Autodesk.Revit.DB import XYZ
+        return XYZ(x, y, z)
+
+    def to_local(self, world_point):
+        """Convert world coordinates to local coordinates (lx, ly, lz) relative to this frame."""
+        dx = world_point.X - self.origin.X
+        dy = world_point.Y - self.origin.Y
+        dz = world_point.Z - self.origin.Z
+
+        lx = dx * self.x_axis.X + dy * self.x_axis.Y + dz * self.x_axis.Z
+        ly = dx * self.y_axis.X + dy * self.y_axis.Y + dz * self.y_axis.Z
+        lz = dx * self.z_axis.X + dy * self.z_axis.Y + dz * self.z_axis.Z
+        from Autodesk.Revit.DB import XYZ
+        return XYZ(lx, ly, lz)
+
+
+class HeelStructuralMeaning(object):
+    """Defines structural meanings for the different roof truss heel modes."""
+    FLUSH = "top-aligned analytical join"
+    SEAT_CUT = "birdsmouth/bearing seat"
+    OVERLAP = "overlapping chord bearing"
+

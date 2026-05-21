@@ -3,7 +3,7 @@
 
 import math
 
-from wf_geometry import analyze_wall, find_openings, height_at_position
+from wf_geometry import analyze_wall, find_openings, height_at_position, GeometryCurve
 from wf_config import WALL_BASE_MODE_WALL, WALL_BASE_MODE_SUPPORT_TOP
 
 
@@ -58,12 +58,12 @@ class WallHostInfo(HostElementInfo):
     def __init__(self):
         HostElementInfo.__init__(self)
         self.wall_info = None
-        self.start_point = None
-        self.end_point = None
-        self.direction = None
-        self.normal = None
+        self._start_point = None
+        self._end_point = None
+        self._direction = None
+        self._normal = None
+        self._length = 0.0
         self.up_axis = None
-        self.length = 0.0
         self.height = 0.0
         self.start_height = 0.0
         self.end_height = 0.0
@@ -74,17 +74,67 @@ class WallHostInfo(HostElementInfo):
         self.current_location_line_offset = 0.0
         self.target_layer_offset = 0.0
         self.openings = []
+        self.raw_curve = None
+        self.framing_curve = None
+
+    @property
+    def start_point(self):
+        return self.framing_curve.start_point if self.framing_curve else self._start_point
+
+    @start_point.setter
+    def start_point(self, val):
+        self._start_point = val
+
+    @property
+    def end_point(self):
+        return self.framing_curve.end_point if self.framing_curve else self._end_point
+
+    @end_point.setter
+    def end_point(self, val):
+        self._end_point = val
+
+    @property
+    def direction(self):
+        return self.framing_curve.direction if self.framing_curve else self._direction
+
+    @direction.setter
+    def direction(self, val):
+        self._direction = val
+
+    @property
+    def normal(self):
+        return self.framing_curve.normal if self.framing_curve else self._normal
+
+    @normal.setter
+    def normal(self, val):
+        self._normal = val
+
+    @property
+    def length(self):
+        return self.framing_curve.length if self.framing_curve else self._length
+
+    @length.setter
+    def length(self, val):
+        self._length = val
 
     def point_at(self, distance_along, height, lateral_offset=0.0):
         """Return a world-space point on the selected wall framing line."""
         from Autodesk.Revit.DB import XYZ
 
         base_z = self.base_elevation + height
-        x = self.start_point.X + self.direction.X * distance_along
-        y = self.start_point.Y + self.direction.Y * distance_along
+        if self.framing_curve is not None:
+            pt = self.framing_curve.point_at(distance_along, lateral_offset)
+            return XYZ(pt.X, pt.Y, base_z)
+
+        # Fallback if framing_curve not initialized
+        start = self.start_point
+        direction = self.direction
+        normal = self.normal
+        x = start.X + direction.X * distance_along
+        y = start.Y + direction.Y * distance_along
         offset = self.target_layer_offset + lateral_offset
-        x += self.normal.X * offset
-        y += self.normal.Y * offset
+        x += normal.X * offset
+        y += normal.Y * offset
         return XYZ(x, y, base_z)
 
     def height_at(self, distance_along):
@@ -184,6 +234,10 @@ def analyze_wall_host(doc, wall, config):
     info.layers = layers
     info.target_layer = target_layer
     info.target_layer_offset = target_shift
+    info.raw_curve = wall_info.raw_curve
+    shifted_start = info.raw_curve.point_at(0.0, target_shift)
+    shifted_end = info.raw_curve.point_at(info.raw_curve.length, target_shift)
+    info.framing_curve = GeometryCurve(shifted_start, shifted_end, info.raw_curve.direction, info.raw_curve.normal)
     info.openings = find_openings(doc, wall, wall_info)
 
     # Optional override: frame wall from selected support-host top elevation.

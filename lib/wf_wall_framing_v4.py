@@ -18,6 +18,7 @@ from wf_geometry import (
     _get_sill_height,
     inches_to_feet,
     safe_wall_normal,
+    GeometryCurve,
 )
 from wf_host import (
     _build_compound_layers,
@@ -96,11 +97,12 @@ class WallCavityHostInfoV4(object):
         self.level_id = None
         self.level_elevation = 0.0
         self.base_elevation = 0.0
-        self.start_point = None
-        self.direction = None
-        self.normal = None
+        self._start_point = None
+        self._end_point = None
+        self._direction = None
+        self._normal = None
+        self._length = 0.0
         self.into_wall = None
-        self.length = 0.0
         self.angle = 0.0
         self.target_layer = None
         self.target_depth_from_interior = 0.0
@@ -117,6 +119,48 @@ class WallCavityHostInfoV4(object):
         self.domain_source = ""
         self.audit = {}
         self.rejections = []
+        self.raw_curve = None
+        self.framing_curve = None
+
+    @property
+    def start_point(self):
+        return self.framing_curve.start_point if self.framing_curve else self._start_point
+
+    @start_point.setter
+    def start_point(self, val):
+        self._start_point = val
+
+    @property
+    def end_point(self):
+        return self.framing_curve.end_point if self.framing_curve else self._end_point
+
+    @end_point.setter
+    def end_point(self, val):
+        self._end_point = val
+
+    @property
+    def direction(self):
+        return self.framing_curve.direction if self.framing_curve else self._direction
+
+    @direction.setter
+    def direction(self, val):
+        self._direction = val
+
+    @property
+    def normal(self):
+        return self.framing_curve.normal if self.framing_curve else self._normal
+
+    @normal.setter
+    def normal(self, val):
+        self._normal = val
+
+    @property
+    def length(self):
+        return self.framing_curve.length if self.framing_curve else self._length
+
+    @length.setter
+    def length(self, val):
+        self._length = val
 
     def point_at_abs(self, distance_along, z_abs, lateral_offset=0.0):
         from Autodesk.Revit.DB import XYZ
@@ -143,10 +187,15 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
             return [], None
 
         # Build wall join plan for automatic corner/intersection stud placement
-        from wf_wall_joins import build_wall_join_plan
+        from wf_wall_joins import build_wall_join_plan, visualize_wall_joins_in_revit
         host.join_plan = build_wall_join_plan(
             self.doc, host, self.config, STUD_THICKNESS
         )
+        if getattr(self.config, "debug_mode", False):
+            try:
+                visualize_wall_joins_in_revit(self.doc, host, host.join_plan)
+            except Exception:
+                pass
 
         occupied = set()
         members = []
@@ -318,8 +367,8 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         host.length = length
         host.end_point = host.start_point + direction * length
         host.target_layer_offset = 0.0
-        host.raw_start_point = p0
-        host.raw_end_point = p1
+        host.raw_curve = GeometryCurve(p0, p1, direction, interior_normal)
+        host.framing_curve = GeometryCurve(host.start_point, host.end_point, direction, interior_normal)
         host.angle = math.atan2(direction.Y, direction.X)
         host.target_layer = target_layer
         host.target_depth_from_interior = target_depth

@@ -115,6 +115,37 @@ class FramingConfig(object):
 
         # Generated-member ownership tracking
         self.track_members = True
+        self.debug_mode = False
+
+    @property
+    def roof_system_type(self):
+        if self.roof_framing_mode == "stick":
+            return "stick"
+        else:
+            return "truss"
+
+    @roof_system_type.setter
+    def roof_system_type(self, val):
+        if val == "stick":
+            self.roof_framing_mode = "stick"
+        elif val == "truss":
+            if self.roof_framing_mode == "stick":
+                self.roof_framing_mode = "simple_truss"
+
+    @property
+    def truss_subtype(self):
+        if self.roof_framing_mode == "simple_truss":
+            return "simple"
+        elif self.roof_framing_mode == "king_post_truss":
+            return "king_post"
+        return None
+
+    @truss_subtype.setter
+    def truss_subtype(self, val):
+        if val == "simple":
+            self.roof_framing_mode = "simple_truss"
+        elif val == "king_post":
+            self.roof_framing_mode = "king_post_truss"
 
     @property
     def stud_spacing_ft(self):
@@ -165,6 +196,7 @@ class FramingConfig(object):
             "truss_style": self.truss_style,
             "roof_framing_mode": self.roof_framing_mode,
             "track_members": self.track_members,
+            "debug_mode": self.debug_mode,
         }
 
     @classmethod

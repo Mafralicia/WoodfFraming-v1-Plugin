@@ -54,8 +54,6 @@ def build_wall_join_plan(doc, wall_info, config, stud_thickness):
 
     this_id = _element_id_value(wall_info.element_id)
     joined_ids = _joined_wall_ids(wall_info.element)
-    raw_wall_start, raw_wall_end = _raw_line_endpoints(wall_info)
-    raw_wall_ends = (raw_wall_start, raw_wall_end)
 
     try:
         from Autodesk.Revit.DB import FilteredElementCollector, Line, Wall
@@ -80,12 +78,6 @@ def build_wall_join_plan(doc, wall_info, config, stud_thickness):
         if not isinstance(other_curve, Line):
             continue
 
-        other_start = other_curve.GetEndPoint(0)
-        other_end = other_curve.GetEndPoint(1)
-        other_dir = (other_end - other_start).Normalize()
-        if _is_parallel(wall_info.direction, other_dir):
-            continue
-
         try:
             other_info = analyze_wall_host(doc, other, config)
         except Exception:
@@ -93,41 +85,49 @@ def build_wall_join_plan(doc, wall_info, config, stud_thickness):
         if other_info is None:
             continue
 
-        other_start, other_end = _raw_line_endpoints(other_info)
+        other_dir = other_info.direction
+        if _is_parallel(wall_info.direction, other_dir):
+            continue
 
+        # Check endpoints of this wall against other wall's raw_curve
         for end_index in (0, 1):
             is_official_join = other_id in joined_ids[end_index]
             if joined_ids[end_index] and not is_official_join:
                 continue
-            other_end_index = _matching_end_index(
-                raw_wall_ends[end_index],
-                other_start,
-                other_end,
-            )
-            if other_end_index is None and not is_official_join:
-                continue
 
-            _merge_end_plan(
-                plan.ends[end_index],
-                this_id,
-                other_id,
-                other_info,
-                stud_thickness,
-                "corner" if other_end_index is not None else "termination",
-            )
+            pt_A = wall_info.raw_curve.point_at(0.0 if end_index == 0 else wall_info.raw_curve.length)
+            dist_along, perp_dist, proj_pt = other_info.raw_curve.project(pt_A)
 
-        for other_pt in (other_start, other_end):
-            framing_distance = _intersection_distance(raw_wall_start, wall_info, other_pt)
-            if framing_distance is None:
-                continue
+            # Check if within tolerance
+            if perp_dist <= END_JOIN_TOL:
+                # Must be on or near the wall segment B
+                if dist_along >= -END_JOIN_TOL and dist_along <= other_info.raw_curve.length + END_JOIN_TOL:
+                    # Corner join if near either end of B
+                    is_corner = (dist_along <= END_JOIN_TOL or dist_along >= other_info.raw_curve.length - END_JOIN_TOL)
+                    
+                    _merge_end_plan(
+                        plan.ends[end_index],
+                        this_id,
+                        other_id,
+                        other_info,
+                        stud_thickness,
+                        "corner" if is_corner else "termination",
+                    )
 
-            _merge_intersection_plan(
-                plan.intersections,
-                framing_distance,
-                other_id,
-                other_info,
-                stud_thickness,
-            )
+        # Check if endpoints of other wall project onto this wall's interior
+        for other_pt in (other_info.raw_curve.start_point, other_info.raw_curve.end_point):
+            dist_along, perp_dist, proj_pt = wall_info.raw_curve.project(other_pt)
+            if perp_dist <= INTERSECTION_TOL:
+                domain_start = getattr(wall_info, "domain_start", 0.0)
+                framing_distance = dist_along - domain_start
+                if END_CLEARANCE < framing_distance < (wall_info.length - END_CLEARANCE):
+                    _merge_intersection_plan(
+                        plan.intersections,
+                        framing_distance,
+                        other_id,
+                        other_info,
+                        stud_thickness,
+                    )
 
     for end_index in (0, 1):
         end_plan = plan.ends[end_index]
@@ -324,8 +324,8 @@ def _framing_line_endpoints(wall_info):
 
 
 def _raw_line_endpoints(wall_info):
-    if hasattr(wall_info, "raw_start_point") and wall_info.raw_start_point is not None:
-        return wall_info.raw_start_point, wall_info.raw_end_point
+    if hasattr(wall_info, "raw_curve") and wall_info.raw_curve is not None:
+        return wall_info.raw_curve.start_point, wall_info.raw_curve.end_point
     return wall_info.start_point, wall_info.end_point
 
 
@@ -361,3 +361,90 @@ def _xy_distance(a, b):
     dx = a.X - b.X
     dy = a.Y - b.Y
     return (dx * dx + dy * dy) ** 0.5
+
+
+def visualize_wall_joins_in_revit(doc, host, join_plan):
+    """Draw model lines in Revit for debug visualization of joins, curves and axes."""
+    try:
+        from Autodesk.Revit.DB import XYZ, Plane, SketchPlane, Line, FilteredElementCollector, GraphicsStyle
+        
+        base_z = host.base_elevation + 1.0 # 1 foot above wall base to be visible
+        
+        plane_origin = XYZ(host.start_point.X, host.start_point.Y, base_z)
+        normal = XYZ.BasisZ
+        
+        try:
+            geom_plane = Plane.CreateByNormalAndOrigin(normal, plane_origin)
+        except Exception:
+            geom_plane = Plane(normal, plane_origin)
+            
+        sketch_plane = SketchPlane.Create(doc, geom_plane)
+        
+        # Try to find colored lines styles
+        styles = FilteredElementCollector(doc).OfClass(GraphicsStyle).ToElements()
+        style_map = {}
+        for s in styles:
+            name = s.Name.lower()
+            if "blue" in name:
+                style_map["blue"] = s
+            elif "red" in name:
+                style_map["red"] = s
+            elif "green" in name:
+                style_map["green"] = s
+        
+        def draw_segment(p0, p1, style_name=None):
+            start = XYZ(p0.X, p0.Y, base_z)
+            end = XYZ(p1.X, p1.Y, base_z)
+            if start.DistanceTo(end) < 0.001:
+                return None
+            line = Line.CreateBound(start, end)
+            model_curve = doc.Create.NewModelCurve(line, sketch_plane)
+            if style_name in style_map:
+                try:
+                    model_curve.LineStyle = style_map[style_name]
+                except Exception:
+                    pass
+            return model_curve
+            
+        # Draw Raw Curve (represents raw location line) - Blue
+        if host.raw_curve is not None:
+            draw_segment(host.raw_curve.start_point, host.raw_curve.end_point, "blue")
+            
+        # Draw Framing Curve - Red
+        if host.framing_curve is not None:
+            draw_segment(host.framing_curve.start_point, host.framing_curve.end_point, "red")
+            
+        # Draw Local Axes at start point
+        if host.direction is not None and host.normal is not None:
+            start_pt = host.start_point
+            x_end = start_pt + host.direction.Multiply(2.0)
+            y_end = start_pt + host.normal.Multiply(1.0)
+            # Longitudinal X is Blue/Green/Default
+            draw_segment(start_pt, x_end, "green")
+            # Lateral Y is Red/Default
+            draw_segment(start_pt, y_end, "red")
+            
+        # Draw Join match lines/points - Green
+        if join_plan is not None:
+            for end_index in (0, 1):
+                end_plan = join_plan.ends[end_index]
+                if end_plan.has_join:
+                    pt = host.framing_curve.point_at(0.0 if end_index == 0 else host.framing_curve.length)
+                    cross_1_start = pt - host.normal.Multiply(0.5)
+                    cross_1_end = pt + host.normal.Multiply(0.5)
+                    cross_2_start = pt - host.direction.Multiply(0.5)
+                    cross_2_end = pt + host.direction.Multiply(0.5)
+                    draw_segment(cross_1_start, cross_1_end, "green")
+                    draw_segment(cross_2_start, cross_2_end, "green")
+                    
+            for intersection in join_plan.intersections:
+                pt = host.framing_curve.point_at(intersection.distance)
+                cross_1_start = pt - host.normal.Multiply(0.5)
+                cross_1_end = pt + host.normal.Multiply(0.5)
+                cross_2_start = pt - host.direction.Multiply(0.5)
+                cross_2_end = pt + host.direction.Multiply(0.5)
+                draw_segment(cross_1_start, cross_1_end, "green")
+                draw_segment(cross_2_start, cross_2_end, "green")
+                
+    except Exception:
+        pass

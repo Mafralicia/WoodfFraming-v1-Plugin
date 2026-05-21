@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Wall framing engine.
 
 Calculates stud, plate, header, sill, king-stud, jack-stud and cripple
@@ -13,7 +13,7 @@ import math
 from wf_geometry import FramingMember, inches_to_feet
 from wf_host import analyze_wall_host
 from wf_placement import BaseFramingEngine
-from wf_wall_joins import build_wall_join_plan
+from wf_wall_joins import build_wall_join_plan, visualize_wall_joins_in_revit
 
 
 MIN_MEMBER_LENGTH = inches_to_feet(1.0)
@@ -53,6 +53,11 @@ class WallFramingEngine(BaseFramingEngine):
             )
         except Exception:
             join_plan = None
+        if getattr(self.config, "debug_mode", False) and join_plan is not None:
+            try:
+                visualize_wall_joins_in_revit(self.doc, wall_info, join_plan)
+            except Exception:
+                pass
         occupied = set()
         members = []
         members.extend(self._calc_bottom_plates(wall_info, openings))

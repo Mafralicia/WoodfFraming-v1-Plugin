@@ -51,72 +51,84 @@ class BaseFramingEngine(object):
             pass
 
         for member in members:
-            symbol = self._resolve_symbol(member)
-            if symbol is None:
-                continue
+            try:
+                symbol = self._resolve_symbol(member)
+                if symbol is None:
+                    continue
 
-            activate_symbol(self.doc, symbol)
+                activate_symbol(self.doc, symbol)
 
-            start = member.start_point
-            end = member.end_point
-            if self._curve_length(start, end) < MIN_MEMBER_LENGTH:
-                continue
+                start = member.start_point
+                end = member.end_point
+                if self._curve_length(start, end) < MIN_MEMBER_LENGTH:
+                    continue
 
-            # Vertical members → Column; horizontal → Beam.
-            stype = (StructuralType.Column
-                     if getattr(member, "is_column", False)
-                     else StructuralType.Beam)
+                # Vertical members → Column; horizontal → Beam.
+                stype = (StructuralType.Column
+                         if getattr(member, "is_column", False)
+                         else StructuralType.Beam)
 
-            is_col = getattr(member, "is_column", False)
-            if is_col and self._is_vertical_member(member):
-                instance = self._place_column_member(member, symbol, level)
-            else:
-                try:
-                    line = Line.CreateBound(start, end)
-                    instance = self.doc.Create.NewFamilyInstance(
-                        line, symbol, level, stype
+                is_col = getattr(member, "is_column", False)
+                instance = self.safe_create_member(member, symbol, level, stype)
+
+                if instance is None:
+                    continue
+
+                # Center cross-section and apply the requested rotation.
+                self._center_on_curve(instance)
+                if is_col:
+                    self._rotate_vertical_member(
+                        instance,
+                        start,
+                        getattr(member, "rotation", 0.0),
                     )
-                except Exception:
-                    instance = None
+                else:
+                    self._set_rotation(instance, getattr(member, "rotation", 0.0))
+                    if (StructuralFramingUtils is not None
+                            and getattr(member, "disallow_end_joins", False)):
+                        for end_index in (0, 1):
+                            try:
+                                StructuralFramingUtils.DisallowJoinAtEnd(
+                                    instance,
+                                    end_index,
+                                )
+                            except Exception:
+                                pass
 
-            if instance is None:
-                continue
-
-            # Center cross-section and apply the requested rotation.
-            self._center_on_curve(instance)
-            if is_col:
-                self._rotate_vertical_member(
-                    instance,
-                    start,
-                    getattr(member, "rotation", 0.0),
-                )
-            else:
-                self._set_rotation(instance, getattr(member, "rotation", 0.0))
-                if (StructuralFramingUtils is not None
-                        and getattr(member, "disallow_end_joins", False)):
-                    for end_index in (0, 1):
-                        try:
-                            StructuralFramingUtils.DisallowJoinAtEnd(
-                                instance,
-                                end_index,
-                            )
-                        except Exception:
-                            pass
-
-            if getattr(self.config, "track_members", True):
+                if getattr(self.config, "track_members", True):
+                    try:
+                        tag_instance(instance, host_info, member)
+                    except Exception:
+                        pass
                 try:
-                    tag_instance(instance, host_info, member)
+                    apply_bom_metadata_from_member(instance, host_info, member)
                 except Exception:
                     pass
-            try:
-                apply_bom_metadata_from_member(instance, host_info, member)
+
+                placed.append(instance)
+                self._last_placed_pairs.append((member, instance))
             except Exception:
                 pass
 
-            placed.append(instance)
-            self._last_placed_pairs.append((member, instance))
-
         return placed
+
+    def safe_create_member(self, member, symbol, level, stype):
+        """Create a single family instance safely with error boundary."""
+        from Autodesk.Revit.DB import Line
+        from Autodesk.Revit.DB.Structure import StructuralType
+        is_col = (stype == StructuralType.Column or getattr(member, "is_column", False))
+        if is_col and self._is_vertical_member(member):
+            return self._place_column_member(member, symbol, level)
+        else:
+            try:
+                start = member.start_point
+                end = member.end_point
+                line = Line.CreateBound(start, end)
+                return self.doc.Create.NewFamilyInstance(
+                    line, symbol, level, stype
+                )
+            except Exception:
+                return None
 
     # ------------------------------------------------------------------
     #  Family resolution

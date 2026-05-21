@@ -1121,8 +1121,9 @@ class RoofFramingEngineV2(BaseFramingEngine):
         members = []
         members.extend(self._make_ridge_boards_from_plan(plan))
 
-        mode = getattr(self.config, "roof_framing_mode", "stick")
-        if mode in ("simple_truss", "king_post_truss"):
+        if getattr(self.config, "roof_system_type", "stick") == "truss":
+            subtype = getattr(self.config, "truss_subtype", "simple")
+            mode = "king_post_truss" if subtype == "king_post" else "simple_truss"
             members.extend(self._make_trusses_from_plan(plan, mode))
         else:
             seen = set()
@@ -1583,7 +1584,11 @@ class RoofFramingEngineV2(BaseFramingEngine):
         bc_start = heel_left
         bc_end = heel_right
 
+        from wf_geometry import HeelStructuralMeaning
+        structural_meaning = HeelStructuralMeaning.FLUSH
+
         if heel_mode == "seat_cut":
+            structural_meaning = HeelStructuralMeaning.SEAT_CUT
             # Shift top chords up vertically by member_depth
             vertical_offset = XYZ(0, 0, member_depth)
             tc_left_start = tc_left_start + vertical_offset
@@ -1591,6 +1596,7 @@ class RoofFramingEngineV2(BaseFramingEngine):
             tc_right_start = tc_right_start + vertical_offset
             tc_right_end = tc_right_end + vertical_offset
         elif heel_mode == "overlap":
+            structural_meaning = HeelStructuralMeaning.OVERLAP
             # Shift top chords laterally (along E) to overlap side-by-side
             tc_left_start = tc_left_start + E.Multiply(member_width)
             tc_left_end = tc_left_end + E.Multiply(member_width)
@@ -1615,6 +1621,7 @@ class RoofFramingEngineV2(BaseFramingEngine):
             bc.parent_id = str(host_id)
             bc.supported_by = "WALL"
             bc.supports = ["TRUSS_TOP_CHORD"]
+            bc.structural_meaning = structural_meaning
             members.append(bc)
 
         # Build Left Top Chord
@@ -1630,6 +1637,7 @@ class RoofFramingEngineV2(BaseFramingEngine):
             tc_left.parent_id = str(host_id)
             tc_left.supported_by = "TRUSS_BOTTOM_CHORD"
             tc_left.supports = ["ROOF_DECK"]
+            tc_left.structural_meaning = structural_meaning
             members.append(tc_left)
 
         # Build Right Top Chord
@@ -1645,6 +1653,7 @@ class RoofFramingEngineV2(BaseFramingEngine):
             tc_right.parent_id = str(host_id)
             tc_right.supported_by = "TRUSS_BOTTOM_CHORD"
             tc_right.supports = ["ROOF_DECK"]
+            tc_right.structural_meaning = structural_meaning
             members.append(tc_right)
 
         # Add King Post and Diagonals if king_post_truss mode
