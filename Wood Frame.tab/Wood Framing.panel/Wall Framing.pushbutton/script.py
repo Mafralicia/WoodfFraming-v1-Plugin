@@ -284,14 +284,120 @@ def _support_top_elevation(element):
     return None
 
 
+def _check_walls_intersect_geometrically(wall_a, wall_b, tol=0.5):
+    """Check if two walls intersect or join geometrically using XY projection and Z-overlap."""
+    loc_a = getattr(wall_a, "Location", None)
+    loc_b = getattr(wall_b, "Location", None)
+    if not loc_a or not loc_b:
+        return False
+    if not hasattr(loc_a, "Curve") or not hasattr(loc_b, "Curve"):
+        return False
+        
+    curve_a = loc_a.Curve
+    curve_b = loc_b.Curve
+    if curve_a is None or curve_b is None:
+        return False
+        
+    try:
+        pa0 = curve_a.GetEndPoint(0)
+        pa1 = curve_a.GetEndPoint(1)
+        pb0 = curve_b.GetEndPoint(0)
+        pb1 = curve_b.GetEndPoint(1)
+    except Exception:
+        return False
+        
+    # Directions in 2D
+    dir_a = (pa1 - pa0).Normalize()
+    dir_b = (pb1 - pb0).Normalize()
+    
+    # Are they parallel?
+    try:
+        dot = abs(dir_a.DotProduct(dir_b))
+    except Exception:
+        return False
+        
+    if dot >= 0.999: # Parallel within ~2 degrees
+        # Check distance between endpoints
+        for pt_a in (pa0, pa1):
+            for pt_b in (pb0, pb1):
+                dx = pt_a.X - pt_b.X
+                dy = pt_a.Y - pt_b.Y
+                dist_xy = (dx*dx + dy*dy) ** 0.5
+                if dist_xy <= tol:
+                    # Check Z overlap
+                    z_min_a = min(pa0.Z, pa1.Z)
+                    z_max_a = max(pa0.Z, pa1.Z)
+                    z_min_b = min(pb0.Z, pb1.Z)
+                    z_max_b = max(pb0.Z, pb1.Z)
+                    if max(z_min_a, z_min_b) - min(z_max_a, z_max_b) < 2.0:
+                        return True
+        return False
+        
+    # Intersection in XY projection
+    denom = dir_a.X * dir_b.Y - dir_a.Y * dir_b.X
+    if abs(denom) < 1e-9:
+        return False
+        
+    dx = pb0.X - pa0.X
+    dy = pb0.Y - pa0.Y
+    t_a = (dx * dir_b.Y - dy * dir_b.X) / denom
+    
+    pt_intersect = DB.XYZ(pa0.X + dir_a.X * t_a, pa0.Y + dir_a.Y * t_a, pa0.Z + dir_a.Z * t_a)
+    
+    # Check if pt_intersect lies within segment boundaries (with tolerance)
+    len_a = curve_a.Length
+    len_b = curve_b.Length
+    
+    d_a = (pt_intersect - pa0).DotProduct(dir_a)
+    d_b = (pt_intersect - pb0).DotProduct(dir_b)
+    
+    if -tol <= d_a <= len_a + tol and -tol <= d_b <= len_b + tol:
+        # Check vertical/Z overlap (within 8 feet)
+        z_min_a = min(pa0.Z, pa1.Z)
+        z_max_a = max(pa0.Z, pa1.Z)
+        z_min_b = min(pb0.Z, pb1.Z)
+        z_max_b = max(pb0.Z, pb1.Z)
+        
+        # Check overlap
+        overlap = max(0.0, min(z_max_a, z_max_b) - max(z_min_a, z_min_b))
+        if overlap > 0.0 or abs(max(z_min_a, z_min_b) - min(z_max_a, z_max_b)) < 8.0:
+            return True
+            
+    return False
+
+
 def _delete_existing_wall_members(doc, walls, include_legacy):
-    wall_ids = set()
+    selected_wall_ids = set()
+    joined_wall_ids = set()
     for wall in walls or []:
         wall_id = _element_id_text(getattr(wall, "Id", None))
         if wall_id:
-            wall_ids.add(wall_id)
-    if not wall_ids:
+            selected_wall_ids.add(wall_id)
+    if not selected_wall_ids:
         return {"wall_v4": 0, "wall_v2": 0, "wall": 0, "wall_join": 0}
+
+    # 1. Quick check using Revit join endpoints
+    for wall in walls or []:
+        loc_curve = wall.Location
+        if loc_curve and hasattr(loc_curve, "Curve"):
+            for end_idx in (0, 1):
+                joined_elems = loc_curve.get_ElementsAtJoin(end_idx)
+                if joined_elems:
+                    for elem_id in joined_elems:
+                        eid_str = _element_id_text(elem_id)
+                        if eid_str and eid_str not in selected_wall_ids:
+                            joined_wall_ids.add(eid_str)
+
+    # 2. Geometric intersection check for unselected walls
+    all_db_walls = list(DB.FilteredElementCollector(doc).OfClass(DB.Wall).WhereElementIsNotElementType())
+    for db_wall in all_db_walls:
+        db_wall_id = _element_id_text(db_wall.Id)
+        if db_wall_id in selected_wall_ids or db_wall_id in joined_wall_ids:
+            continue
+        for sel_wall in walls:
+            if _check_walls_intersect_geometrically(sel_wall, db_wall, tol=0.5):
+                joined_wall_ids.add(db_wall_id)
+                break
 
     allowed_kinds = set(["wall_v4", "wall_v2", "wall_join"])
     if include_legacy:
@@ -317,7 +423,9 @@ def _delete_existing_wall_members(doc, walls, include_legacy):
             kind = tracking.get("kind")
             if kind not in allowed_kinds:
                 continue
-            if tracking.get("host") in wall_ids:
+            
+            host_id = tracking.get("host")
+            if host_id in selected_wall_ids:
                 delete_items.append((element.Id, kind))
 
     deleted = {"wall_v4": 0, "wall_v2": 0, "wall": 0, "wall_join": 0}
@@ -471,26 +579,33 @@ def main():
         # ----------------------------------------------------------------
         # Collect all walls in the document to find joins/intersections
         all_db_walls = list(DB.FilteredElementCollector(doc).OfClass(DB.Wall).WhereElementIsNotElementType())
+        all_db_walls_by_id = {str(_element_id_text(w.Id)): w for w in all_db_walls}
         selected_wall_ids = {_element_id_text(w.Id) for w in walls}
-        context_walls = []
-        for db_wall in all_db_walls:
-            db_wall_id = _element_id_text(db_wall.Id)
-            if db_wall_id in selected_wall_ids:
-                continue
-            loc_curve = db_wall.Location
+        context_wall_ids = set()
+
+        # 1. Quick check using Revit join endpoints
+        for wall in walls:
+            loc_curve = wall.Location
             if loc_curve and hasattr(loc_curve, "Curve"):
-                joined_to_selected = False
                 for end_idx in (0, 1):
                     joined_elems = loc_curve.get_ElementsAtJoin(end_idx)
                     if joined_elems:
                         for elem_id in joined_elems:
-                            if _element_id_text(elem_id) in selected_wall_ids:
-                                joined_to_selected = True
-                                break
-                    if joined_to_selected:
-                        break
-                if joined_to_selected:
-                    context_walls.append(db_wall)
+                            eid_str = _element_id_text(elem_id)
+                            if eid_str and eid_str not in selected_wall_ids:
+                                context_wall_ids.add(eid_str)
+
+        # 2. Geometric intersection check for unselected walls
+        for db_wall in all_db_walls:
+            db_wall_id = _element_id_text(db_wall.Id)
+            if db_wall_id in selected_wall_ids or db_wall_id in context_wall_ids:
+                continue
+            for sel_wall in walls:
+                if _check_walls_intersect_geometrically(sel_wall, db_wall, tol=0.5):
+                    context_wall_ids.add(db_wall_id)
+                    break
+
+        context_walls = [all_db_walls_by_id[wid] for wid in context_wall_ids if wid in all_db_walls_by_id]
 
         hosts = []
         host_map = {}  # wall_id_text -> (members, host)
@@ -542,8 +657,11 @@ def main():
                 m_wid = _element_id_text(getattr(m, "host_id", None))
                 if m_wid in wall_members_map:
                     wall_members_map[m_wid].append(m)
-                else:
+                elif m_wid is None:
+                    # Fallback for members missing host_id (should not happen, but safe)
                     wall_members_map[wid].append(m)
+                # If m_wid is set but not in wall_members_map, it belongs to an unselected
+                # context wall, so we discard/skip it on this run.
 
         # ----------------------------------------------------------------
         # Pass 1 – Analytical validation (before placement).
