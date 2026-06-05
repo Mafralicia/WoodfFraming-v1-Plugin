@@ -103,7 +103,7 @@ class ValidationReport(object):
 class FramingValidator(object):
     """Runs analytical and placement validation checks."""
 
-    def __init__(self, graph, wall_members_map):
+    def __init__(self, graph, wall_members_map, host_info_map=None):
         """
         Parameters
         ----------
@@ -111,9 +111,11 @@ class FramingValidator(object):
         wall_members_map : dict[str, list[FramingMember]]
             Mapping of wall_id_text → list of FramingMember objects for that
             wall, already generated but not yet placed.
+        host_info_map : dict[str, WallCavityHostInfoV4] or None
         """
         self.graph = graph
         self.wall_members_map = wall_members_map  # {wall_id_text: [members]}
+        self.host_info_map = host_info_map
         self.report = ValidationReport()
 
     # ------------------------------------------------------------------
@@ -160,7 +162,13 @@ class FramingValidator(object):
         seen = []  # list of (wall_id, d, bottom_z, top_z)
         for m in verticals:
             wall_id = _element_id_text(getattr(m, "host_id", None))
-            d = _member_d(m)
+            host = None
+            if self.host_info_map and wall_id in self.host_info_map:
+                host = self.host_info_map[wall_id]
+            elif self.graph and wall_id in self.graph._nodes_by_id:
+                host = self.graph._nodes_by_id[wall_id].host
+
+            d = _member_d(m, host)
             bz = _member_bottom_z(m)
             tz = _member_top_z(m)
             for (w, od, ob, ot) in seen:
@@ -286,14 +294,24 @@ def _is_vertical(member):
         return False
 
 
-def _member_d(member):
-    """Return an approximate d-axis position for a member (midpoint X or Y)."""
+def _member_d(member, host=None):
+    """Return an approximate d-axis position for a member.
+    If host is provided, projects onto the host wall direction.
+    Otherwise, falls back to midpoint X coordinate.
+    """
     start = getattr(member, "start_point", None)
     end = getattr(member, "end_point", None)
     if start is None or end is None:
         return 0.0
     try:
-        return ((start.X + end.X) * 0.5) if True else 0.0
+        mid_x = (start.X + end.X) * 0.5
+        mid_y = (start.Y + end.Y) * 0.5
+        if host is not None:
+            from Autodesk.Revit.DB import XYZ
+            mid = XYZ(mid_x, mid_y, host.base_elevation)
+            vec = mid - host.start_point
+            return vec.DotProduct(host.direction)
+        return mid_x
     except Exception:
         return 0.0
 

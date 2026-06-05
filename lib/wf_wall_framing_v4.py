@@ -196,16 +196,20 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                         asm_members = corner_gen.generate(self, edge)
                         members.extend(asm_members)
                         for m in asm_members:
-                            d = _member_d_approx(host, m)
-                            if d is not None:
-                                occupied.add(round(d, 4))
+                            m_host_id = getattr(m, "host_id", None)
+                            if m_host_id is not None and str(m_host_id.IntegerValue if hasattr(m_host_id, "IntegerValue") else m_host_id) == str(host.element_id.IntegerValue if hasattr(host.element_id, "IntegerValue") else host.element_id):
+                                d = _member_d_approx(host, m)
+                                if d is not None:
+                                    occupied.add(round(d, 4))
                     elif edge.is_t:
                         asm_members = t_gen.generate(self, edge)
                         members.extend(asm_members)
                         for m in asm_members:
-                            d = _member_d_approx(host, m)
-                            if d is not None:
-                                occupied.add(round(d, 4))
+                            m_host_id = getattr(m, "host_id", None)
+                            if m_host_id is not None and str(m_host_id.IntegerValue if hasattr(m_host_id, "IntegerValue") else m_host_id) == str(host.element_id.IntegerValue if hasattr(host.element_id, "IntegerValue") else host.element_id):
+                                d = _member_d_approx(host, m)
+                                if d is not None:
+                                    occupied.add(round(d, 4))
                 else:
                     # Secondary wall — the owner generated the assembly.
                     # Pull the reservation that the generator registered on

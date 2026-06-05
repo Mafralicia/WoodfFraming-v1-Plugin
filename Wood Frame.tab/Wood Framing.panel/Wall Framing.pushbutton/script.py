@@ -487,7 +487,9 @@ def main():
         # ----------------------------------------------------------------
         # Generate all framing members (topology-aware when graph is set).
         # ----------------------------------------------------------------
-        wall_members_map = {}  # wall_id_text -> [members]
+        wall_members_map = {
+            _element_id_text(wall.Id): [] for wall in walls
+        }
         host_info_map = {}     # wall_id_text -> host
         skipped_walls = []
 
@@ -498,13 +500,20 @@ def main():
                 skipped_walls.append(getattr(wall, "Id", None))
                 continue
             wid = _element_id_text(getattr(host, "element_id", None))
-            wall_members_map[wid] = [m for m in members if m is not None]
             host_info_map[wid] = host
+            for m in members:
+                if m is None:
+                    continue
+                m_wid = _element_id_text(getattr(m, "host_id", None))
+                if m_wid in wall_members_map:
+                    wall_members_map[m_wid].append(m)
+                else:
+                    wall_members_map[wid].append(m)
 
         # ----------------------------------------------------------------
         # Pass 1 – Analytical validation (before placement).
         # ----------------------------------------------------------------
-        validator = FramingValidator(graph, wall_members_map)
+        validator = FramingValidator(graph, wall_members_map, host_info_map)
         pass1_ok = validator.run_pass1()
 
         # ----------------------------------------------------------------
@@ -512,6 +521,8 @@ def main():
         # ----------------------------------------------------------------
         placed_instances_map = {}
         for wid, members in wall_members_map.items():
+            if wid not in host_info_map:
+                continue
             host = host_info_map[wid]
             placed = engine.place_members(members, host)
             wall_count += 1
