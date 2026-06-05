@@ -107,8 +107,8 @@ class JoinBoundaryResolver(object):
         secondary_studs = [secondary_end_d]
 
         if corner_style in ("california", "three_stud"):
-            # Add a backing stud one stud-thickness inboard on the owner.
-            backing_d = owner_end_d + owner_sign * STUD_THICKNESS
+            # Add a backing stud flush with the secondary wall's inner face.
+            backing_d = owner_end_d + owner_sign * (sec_depth - STUD_THICKNESS)
             backing_d = max(owner_lower, min(owner_upper, backing_d))
             owner_studs.append(backing_d)
 

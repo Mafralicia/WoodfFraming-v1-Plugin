@@ -780,6 +780,41 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
     # ------------------------------------------------------------------
 
     def _wall_shape_members(self, host, occupied, node=None):
+        if node is not None:
+            from Autodesk.Revit.DB import XYZ
+            # Inspect the node's corner edges where this wall is the owner
+            for edge in getattr(node, "edges", []):
+                if edge.is_corner and edge.owner_node is node:
+                    sec_node = edge.secondary_node
+                    sec_host = getattr(sec_node, "host", None)
+                    if sec_host is not None:
+                        sec_depth = sec_host.target_layer.width if getattr(sec_host, "target_layer", None) else DEFAULT_LUMBER_DEPTH
+                        ext_amount = sec_depth * 0.5
+                        end_index = edge.end_index_on(node)
+                        d_owner = edge.d_on(node)
+                        
+                        # Find bottom and top segments that touch this corner and extend them
+                        for segment in host.perimeter_segments:
+                            if segment.kind in ("bottom", "top"):
+                                # Check if segment touches the corner
+                                touches_d0 = abs(segment.d0 - d_owner) < 0.2 or (end_index == 0 and abs(segment.d0) < 0.2) or (end_index == 1 and abs(segment.d0 - host.length) < 0.2)
+                                touches_d1 = abs(segment.d1 - d_owner) < 0.2 or (end_index == 0 and abs(segment.d1) < 0.2) or (end_index == 1 and abs(segment.d1 - host.length) < 0.2)
+                                
+                                delta_d = -ext_amount if end_index == 0 else ext_amount
+                                
+                                if touches_d0:
+                                    denom = segment.d0 - segment.d1
+                                    slope = (segment.p0.Z - segment.p1.Z) / denom if abs(denom) > 1e-9 else 0.0
+                                    shift_vec = XYZ(host.direction.X * delta_d, host.direction.Y * delta_d, slope * delta_d)
+                                    segment.p0 = segment.p0 + shift_vec
+                                    segment.d0 = segment.d0 + delta_d
+                                elif touches_d1:
+                                    denom = segment.d1 - segment.d0
+                                    slope = (segment.p1.Z - segment.p0.Z) / denom if abs(denom) > 1e-9 else 0.0
+                                    shift_vec = XYZ(host.direction.X * delta_d, host.direction.Y * delta_d, slope * delta_d)
+                                    segment.p1 = segment.p1 + shift_vec
+                                    segment.d1 = segment.d1 + delta_d
+
         members = []
         members.extend(self._bottom_plates(host))
         members.extend(self._top_plates(host))
