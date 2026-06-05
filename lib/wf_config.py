@@ -76,6 +76,7 @@ class FramingConfig(object):
         # Sill plate (below windows)
         self.sill_plate_family_name = None
         self.sill_plate_type_name = None
+        self.sill_plate_count = 2                 # default double sill
 
         # General options
         self.include_corner_studs = True
@@ -139,6 +140,7 @@ class FramingConfig(object):
             "mid_plate_interval_ft": self.mid_plate_interval_ft,
             "sill_plate_family_name": self.sill_plate_family_name,
             "sill_plate_type_name": self.sill_plate_type_name,
+            "sill_plate_count": self.sill_plate_count,
             "include_corner_studs": self.include_corner_studs,
             "include_cripple_studs": self.include_cripple_studs,
             "include_king_studs": self.include_king_studs,

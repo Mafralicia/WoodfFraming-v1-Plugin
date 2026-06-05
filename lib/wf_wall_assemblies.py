@@ -76,12 +76,23 @@ class JoinBoundaryResolver(object):
         # Owner end stud is at d_owner ± stud_half from the true end.
         # We place it inboard by half-stud so it is fully inside the wall.
         owner_sign = 1.0 if d_owner <= host_owner.length * 0.5 else -1.0
-        owner_end_d = d_owner + owner_sign * stud_half
+        # Retrieve target layer thicknesses (framing depth)
+        owner_depth = host_owner.target_layer.width if getattr(host_owner, "target_layer", None) else DEFAULT_LUMBER_DEPTH
+        sec_depth = host_secondary.target_layer.width if getattr(host_secondary, "target_layer", None) else DEFAULT_LUMBER_DEPTH
+
+        # The owner wall framing extends to the outer framing face of the secondary wall.
+        # owner_sign points inboard. So -owner_sign points outboard (towards the exterior face).
+        sec_outer_face_offset = -owner_sign * (sec_depth * 0.5)
+        owner_outer_boundary = d_owner + sec_outer_face_offset
+        owner_end_d = owner_outer_boundary + owner_sign * stud_half
         owner_end_d = max(stud_half, min(host_owner.length - stud_half, owner_end_d))
 
-        # Secondary's end stud sits at d_secondary similarly.
+        # The secondary wall terminates flush against the inner framing face of the owner wall.
+        # The inner face of the owner wall framing is in the inboard direction relative to secondary centerline.
         secondary_sign = 1.0 if d_secondary <= host_secondary.length * 0.5 else -1.0
-        secondary_end_d = d_secondary + secondary_sign * stud_half
+        owner_inner_face_offset = secondary_sign * (owner_depth * 0.5)
+        sec_inner_boundary = d_secondary + owner_inner_face_offset
+        secondary_end_d = sec_inner_boundary + secondary_sign * stud_half
         secondary_end_d = max(stud_half, min(host_secondary.length - stud_half, secondary_end_d))
 
         owner_studs = [owner_end_d]
@@ -102,20 +113,20 @@ class JoinBoundaryResolver(object):
         # Build reservations wide enough to exclude infill from this zone.
         pad = CORNER_FOOTPRINT_PAD
         if owner_sign > 0:
-            owner_res = Reservation(0.0, owner_end_d + pad,
+            owner_res = Reservation(0.0, max(0.0, owner_end_d + pad),
                                     ReservationPriority.CORNER,
                                     "corner_owner_end")
         else:
-            owner_res = Reservation(owner_end_d - pad, host_owner.length,
+            owner_res = Reservation(min(host_owner.length, owner_end_d - pad), host_owner.length,
                                     ReservationPriority.CORNER,
                                     "corner_owner_end")
 
         if secondary_sign > 0:
-            sec_res = Reservation(0.0, secondary_end_d + pad,
+            sec_res = Reservation(0.0, max(0.0, secondary_end_d + pad),
                                   ReservationPriority.CORNER,
                                   "corner_secondary_end")
         else:
-            sec_res = Reservation(secondary_end_d - pad, host_secondary.length,
+            sec_res = Reservation(min(host_secondary.length, secondary_end_d - pad), host_secondary.length,
                                   ReservationPriority.CORNER,
                                   "corner_secondary_end")
 
@@ -379,9 +390,19 @@ class TIntersectionGenerator(object):
         The owner node is treated as the main wall.
         The secondary node is the branch wall.
         """
-        # For T-joins the "owner" drives which wall is the main.
-        main_node = edge.owner_node
-        branch_node = edge.secondary_node
+        # Dynamically resolve main and branch nodes from T-intersection geometry.
+        # The main wall has end_index as None (interior join), while the branch wall meets at an end.
+        if edge.end_index_a is None and edge.end_index_b is not None:
+            main_node = edge.node_a
+            branch_node = edge.node_b
+        elif edge.end_index_b is None and edge.end_index_a is not None:
+            main_node = edge.node_b
+            branch_node = edge.node_a
+        else:
+            # Decomposed cross intersection or fallback: use owner/secondary nodes
+            main_node = edge.owner_node
+            branch_node = edge.secondary_node
+
         main_host = main_node.host
         branch_host = branch_node.host
 
@@ -482,13 +503,14 @@ class WindowAssembly(object):
     def __init__(self, config):
         self.config = config
 
-    def generate(self, engine, host, opening, spacing, occupied):
+    def generate(self, engine, host, node, opening, spacing, occupied):
         """Return members and a Reservation for this opening.
 
         Parameters
         ----------
         engine : WallCavityFramingV4Engine
         host : WallCavityHostInfoV4
+        node : WallTopologyNode or None
         opening : WallCavityOpeningV4
         spacing : float
         occupied : set[float]  -- will be updated in-place with new d positions
@@ -546,14 +568,18 @@ class WindowAssembly(object):
                     members.append(m)
                     occupied.add(round(d, 4))
 
-        # Sill plate.
-        sill_center_z = host.base_elevation + opening.sill_height - PLATE_THICKNESS * 0.5
-        if opening.sill_height > PLATE_THICKNESS * plate_bottom:
-            m = _make_horizontal(host, MemberKind.SILL_PLATE,
-                                  left, right, sill_center_z,
-                                  plate_family, plate_type, PLATE_THICKNESS, plate_depth)
-            if m:
-                members.append(m)
+        # Sill plates (configurable count).
+        sill_count = int(getattr(self.config, "sill_plate_count", 2))
+        for i in range(sill_count):
+            offset = (i + 0.5) * PLATE_THICKNESS
+            sill_center_z = host.base_elevation + opening.sill_height - offset
+            if opening.sill_height > PLATE_THICKNESS * (plate_bottom + i) + MIN_MEMBER_LENGTH:
+                # Spans from left - STUD_THICKNESS to right + STUD_THICKNESS (across jack studs, butting into king studs)
+                m = _make_horizontal(host, MemberKind.SILL_PLATE,
+                                      left - STUD_THICKNESS, right + STUD_THICKNESS, sill_center_z,
+                                      plate_family, plate_type, PLATE_THICKNESS, plate_depth)
+                if m:
+                    members.append(m)
 
         # Header bottom plate.
         header_bp_z = host.base_elevation + opening.head_height + PLATE_THICKNESS * 0.5
@@ -602,17 +628,16 @@ class WindowAssembly(object):
             top_bound = top_z
             if header_stack_top < top_bound - MIN_MEMBER_LENGTH:
                 members.extend(_cripples(
-                    engine, host, left, right, header_stack_top, top_bound,
+                    engine, host, node, left, right, header_stack_top, top_bound,
                     spacing, occupied, stud_family, stud_type, stud_depth,
                 ))
 
         # Cripple studs below sill.
-        if (getattr(self.config, "include_cripple_studs", True)
-                and opening.sill_height > PLATE_THICKNESS * plate_bottom + MIN_MEMBER_LENGTH):
-            sill_top = host.base_elevation + opening.sill_height - PLATE_THICKNESS
-            if sill_top > bottom_z + MIN_MEMBER_LENGTH:
+        if getattr(self.config, "include_cripple_studs", True):
+            sill_stack_bottom = host.base_elevation + opening.sill_height - PLATE_THICKNESS * sill_count
+            if sill_stack_bottom > bottom_z + MIN_MEMBER_LENGTH:
                 members.extend(_cripples(
-                    engine, host, left, right, bottom_z, sill_top,
+                    engine, host, node, left, right, bottom_z, sill_stack_bottom,
                     spacing, occupied, stud_family, stud_type, stud_depth,
                 ))
 
@@ -636,7 +661,7 @@ class DoorAssembly(object):
     def __init__(self, config):
         self.config = config
 
-    def generate(self, engine, host, opening, spacing, occupied):
+    def generate(self, engine, host, node, opening, spacing, occupied):
         left = opening.left_edge
         right = opening.right_edge
         if right - left < MIN_MEMBER_LENGTH:
@@ -733,7 +758,7 @@ class DoorAssembly(object):
         if getattr(self.config, "include_cripple_studs", True):
             if header_stack_top < top_z - MIN_MEMBER_LENGTH:
                 members.extend(_cripples(
-                    engine, host, left, right, header_stack_top, top_z,
+                    engine, host, node, left, right, header_stack_top, top_z,
                     spacing, occupied, stud_family, stud_type, stud_depth,
                 ))
 
@@ -744,25 +769,36 @@ class DoorAssembly(object):
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _cripples(engine, host, left, right, bottom_abs_z, top_abs_z,
+def _cripples(engine, host, node, left, right, bottom_abs_z, top_abs_z,
               spacing, occupied, family, type_name, section_depth):
-    """Generate cripple studs between left and right at specified z range."""
+    """Generate cripple studs between left and right aligned with layout phase."""
     members = []
     if spacing <= 0.0 or top_abs_z - bottom_abs_z < MIN_MEMBER_LENGTH:
         return members
-    d = _next_spacing_station(left, spacing)
-    while d < right - STUD_THICKNESS * 0.5:
-        if left + STUD_THICKNESS * 0.5 < d < right - STUD_THICKNESS * 0.5:
-            if not _near(d, occupied, STUD_THICKNESS):
-                m = _make_vertical(
-                    host, MemberKind.CRIPPLE_STUD, d,
-                    bottom_abs_z, top_abs_z,
-                    family, type_name, True,
-                    STUD_THICKNESS, section_depth,
-                )
-                if m:
-                    members.append(m)
-        d += spacing
+
+    d_min = left + STUD_THICKNESS * 0.5
+    d_max = right - STUD_THICKNESS * 0.5
+
+    if node is not None and getattr(node, "layout_phase_set", False):
+        stations = list(node.layout_phase.stations_in_range(d_min, d_max, spacing))
+    else:
+        stations = []
+        d = _next_spacing_station(left, spacing)
+        while d < d_max:
+            if d > d_min:
+                stations.append(d)
+            d += spacing
+
+    for d in stations:
+        if not _near(d, occupied, STUD_THICKNESS):
+            m = _make_vertical(
+                host, MemberKind.CRIPPLE_STUD, d,
+                bottom_abs_z, top_abs_z,
+                family, type_name, True,
+                STUD_THICKNESS, section_depth,
+            )
+            if m:
+                members.append(m)
     return members
 
 

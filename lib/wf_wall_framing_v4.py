@@ -1067,11 +1067,11 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         for opening in host.openings:
             if opening.is_window:
                 asm_members, reservation = win_asm.generate(
-                    self, host, opening, spacing, occupied
+                    self, host, node, opening, spacing, occupied
                 )
             else:
                 asm_members, reservation = door_asm.generate(
-                    self, host, opening, spacing, occupied
+                    self, host, node, opening, spacing, occupied
                 )
             members.extend([m for m in asm_members if m is not None])
             if reservation is not None and node is not None:
