@@ -178,9 +178,14 @@ class JoinBoundaryResolver(object):
             main_studs.append(main_right)
 
         # Branch wall: end stud at d_branch.
+        main_depth = host_main.target_layer.width if getattr(host_main, "target_layer", None) else DEFAULT_LUMBER_DEPTH
         branch_sign = 1.0 if d_branch <= host_branch.length * 0.5 else -1.0
-        branch_end_d = d_branch + branch_sign * stud_half
-        branch_end_d = max(stud_half, min(host_branch.length - stud_half, branch_end_d))
+        # Terminate flush against the inner face of the main wall framing
+        branch_end_d = d_branch + branch_sign * (main_depth * 0.5 + stud_half)
+        
+        branch_lower = -main_depth
+        branch_upper = host_branch.length + main_depth
+        branch_end_d = max(branch_lower, min(branch_upper, branch_end_d))
         branch_studs.append(branch_end_d)
 
         # Reservations.
@@ -576,20 +581,64 @@ class WindowAssembly(object):
                     members.append(m)
                     occupied.add(round(d, 4))
 
-        # Sill plates (configurable count).
-        sill_count = int(getattr(self.config, "sill_plate_count", 2))
-        placed_sill_count = 0
-        for i in range(sill_count):
-            if opening.sill_height >= PLATE_THICKNESS * (plate_bottom + i + 1) + MIN_MEMBER_LENGTH:
-                offset = (i + 0.5) * PLATE_THICKNESS
-                sill_center_z = host.base_elevation + opening.sill_height - offset
-                # Spans from left - STUD_THICKNESS to right + STUD_THICKNESS (across jack studs, butting into king studs)
+        # Sill assembly mirroring the header package:
+        # 1. Sill top plate (directly below opening, flat)
+        # 2. Sill header plies (on edge, matching header count/depth/width)
+        # 3. Sill bottom plate (flat)
+        sill_package_height = PLATE_THICKNESS * 2.0 + header_depth
+        
+        # Check if we have enough height to place the full mirrored sill package
+        if opening.sill_height >= PLATE_THICKNESS * plate_bottom + sill_package_height + MIN_MEMBER_LENGTH:
+            # Sill top plate
+            sill_tp_z = host.base_elevation + opening.sill_height - PLATE_THICKNESS * 0.5
+            m = _make_horizontal(host, MemberKind.SILL_PLATE,
+                                  left - STUD_THICKNESS, right + STUD_THICKNESS, sill_tp_z,
+                                  plate_family, plate_type, PLATE_THICKNESS, plate_depth)
+            if m:
+                members.append(m)
+                
+            # Sill header plies (on edge, oriented vertically like a header)
+            sill_ply_bottom = host.base_elevation + opening.sill_height - PLATE_THICKNESS
+            sill_ply_center = sill_ply_bottom - header_depth * 0.5
+            header_count = max(MIN_HEADER_PLY_COUNT,
+                               int(getattr(self.config, "header_count", MIN_HEADER_PLY_COUNT)))
+            for lateral in _header_ply_offsets(host, header_count, header_width):
+                start = host.point_at_abs(left - STUD_THICKNESS, sill_ply_center, lateral)
+                end = host.point_at_abs(right + STUD_THICKNESS, sill_ply_center, lateral)
+                if start and end:
+                    m = FramingMember(MemberKind.SILL_PLATE, start, end)
+                    m.member_type = MemberKind.SILL_PLATE
+                    m.family_name = header_family
+                    m.type_name = header_type
+                    m.rotation = HEADER_ROTATION
+                    m.is_column = False
+                    m.host_kind = "wall_v4"
+                    m.host_id = host.element_id
+                    m.disallow_end_joins = True
+                    m.section_height = max(STUD_THICKNESS, header_depth)
+                    m.section_depth = max(STUD_THICKNESS, header_width)
+                    members.append(m)
+                    
+            # Sill bottom plate
+            sill_bp_z = host.base_elevation + opening.sill_height - PLATE_THICKNESS * 1.5 - header_depth
+            m = _make_horizontal(host, MemberKind.SILL_PLATE,
+                                  left - STUD_THICKNESS, right + STUD_THICKNESS, sill_bp_z,
+                                  plate_family, plate_type, PLATE_THICKNESS, plate_depth)
+            if m:
+                members.append(m)
+                
+            sill_stack_bottom = host.base_elevation + opening.sill_height - sill_package_height
+        else:
+            # Fallback if sill height is too low for the full package: place single flat sill plate
+            sill_stack_bottom = host.base_elevation + opening.sill_height
+            if opening.sill_height >= PLATE_THICKNESS * (plate_bottom + 1) + MIN_MEMBER_LENGTH:
+                sill_center_z = host.base_elevation + opening.sill_height - PLATE_THICKNESS * 0.5
                 m = _make_horizontal(host, MemberKind.SILL_PLATE,
                                       left - STUD_THICKNESS, right + STUD_THICKNESS, sill_center_z,
                                       plate_family, plate_type, PLATE_THICKNESS, plate_depth)
                 if m:
                     members.append(m)
-                    placed_sill_count += 1
+                    sill_stack_bottom -= PLATE_THICKNESS
 
         # Header bottom plate.
         header_bp_z = host.base_elevation + opening.head_height + PLATE_THICKNESS * 0.5
@@ -644,7 +693,6 @@ class WindowAssembly(object):
 
         # Cripple studs below sill.
         if getattr(self.config, "include_cripple_studs", True):
-            sill_stack_bottom = host.base_elevation + opening.sill_height - PLATE_THICKNESS * placed_sill_count
             if sill_stack_bottom > bottom_z + MIN_MEMBER_LENGTH:
                 members.extend(_cripples(
                     engine, host, node, left, right, bottom_z, sill_stack_bottom,
