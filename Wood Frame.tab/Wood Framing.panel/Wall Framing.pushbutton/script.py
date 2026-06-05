@@ -467,15 +467,44 @@ def main():
         )
 
         # ----------------------------------------------------------------
-        # Build the topology graph for all selected walls.
+        # Build the topology graph for all selected walls and their unselected joins.
         # ----------------------------------------------------------------
+        # Collect all walls in the document to find joins/intersections
+        all_db_walls = list(DB.FilteredElementCollector(doc).OfClass(DB.Wall).WhereElementIsNotElementType())
+        selected_wall_ids = {w.Id.IntegerValue for w in walls}
+        context_walls = []
+        for db_wall in all_db_walls:
+            if db_wall.Id.IntegerValue in selected_wall_ids:
+                continue
+            loc_curve = db_wall.Location
+            if loc_curve and hasattr(loc_curve, "Curve"):
+                joined_to_selected = False
+                for end_idx in (0, 1):
+                    joined_elems = loc_curve.get_ElementsAtJoin(end_idx)
+                    if joined_elems:
+                        for elem_id in joined_elems:
+                            if elem_id.IntegerValue in selected_wall_ids:
+                                joined_to_selected = True
+                                break
+                    if joined_to_selected:
+                        break
+                if joined_to_selected:
+                    context_walls.append(db_wall)
+
         hosts = []
         host_map = {}  # wall_id_text -> (members, host)
         for wall in walls:
             _members, host = engine.calculate_members(wall)  # analyse geometry
             if host is not None:
+                host.is_selected = True
                 hosts.append(host)
                 host_map[_element_id_text(getattr(host, "element_id", None))] = ([], host)
+
+        for wall in context_walls:
+            _members, host = engine.calculate_members(wall)  # analyse geometry
+            if host is not None:
+                host.is_selected = False
+                hosts.append(host)
 
         graph = None
         if len(hosts) > 1:

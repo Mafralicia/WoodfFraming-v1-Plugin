@@ -190,8 +190,13 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
             t_gen = TIntersectionGenerator(self.config)
 
             for edge in graph.edges_for_node(node):
-                if edge.owner_node is node:
-                    # This wall owns the join — generate the assembly.
+                # Generate join assembly if:
+                # 1. We are the owner node, OR
+                # 2. We are selected, but the owner node is not selected (so the owner won't generate it).
+                is_owner = (edge.owner_node is node)
+                owner_selected = getattr(getattr(edge.owner_node, "host", None), "is_selected", True)
+                if is_owner or not owner_selected:
+                    # Generate the assembly.
                     if edge.is_corner:
                         asm_members = corner_gen.generate(self, edge)
                         members.extend(asm_members)
@@ -902,158 +907,22 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         return "member factory returned no side stud"
 
     def _opening_members(self, host, occupied):
+        """Generate opening members using WindowAssembly / DoorAssembly (when node/topology is not set)."""
         members = []
-        header_family = self.config.header_family_name or self.config.stud_family_name
-        header_type = self.config.header_type_name or self.config.stud_type_name
-        header_depth = self._header_depth(header_family, header_type)
-        header_width = self._type_width(header_family, header_type, False)
-        plate_family = self.config.bottom_plate_family_name or self.config.stud_family_name
-        plate_type = self.config.bottom_plate_type_name or self.config.stud_type_name
-        plate_depth = self._wall_member_depth(host, plate_family, plate_type, False)
-
+        win_asm = WindowAssembly(self.config)
+        door_asm = DoorAssembly(self.config)
+        spacing = self.config.stud_spacing_ft
         for opening in host.openings:
-            left = opening.left_edge
-            right = opening.right_edge
-            if right - left < MIN_MEMBER_LENGTH:
-                continue
-
-            if getattr(self.config, "include_king_studs", True):
-                for d in (left - STUD_THICKNESS * 1.5, right + STUD_THICKNESS * 1.5):
-                    if d <= 0.0 or d >= host.length or _near(d, occupied, OPENING_STUD_COLLISION_TOL):
-                        continue
-                    member = self._vertical_member_at_d(host, "KING_STUD", d, None, None, False)
-                    if member is not None:
-                        members.append(member)
-                        occupied.add(round(d, 4))
-
-            if getattr(self.config, "include_jack_studs", True):
-                for d in (left - STUD_THICKNESS * 0.5, right + STUD_THICKNESS * 0.5):
-                    if d <= 0.0 or d >= host.length or _near(d, occupied, OPENING_STUD_COLLISION_TOL):
-                        continue
-                    member = self._vertical_member_at_d(
-                        host,
-                        "JACK_STUD",
-                        d,
-                        None,
-                        host.base_elevation + opening.head_height,
-                        False,
-                    )
-                    if member is not None:
-                        members.append(member)
-                        occupied.add(round(d, 4))
-
-            span_left = max(0.0, left - STUD_THICKNESS)
-            span_right = min(host.length, right + STUD_THICKNESS)
-            header_stack_top = host.base_elevation + opening.head_height
-            if span_right - span_left >= MIN_MEMBER_LENGTH:
-                bottom_plate_center = (
-                    host.base_elevation
-                    + opening.head_height
-                    + PLATE_THICKNESS * 0.5
+            if opening.is_window:
+                asm_members, reservation = win_asm.generate(
+                    self, host, None, opening, spacing, occupied
                 )
-                start = host.point_at_abs(span_left, bottom_plate_center)
-                end = host.point_at_abs(span_right, bottom_plate_center)
-                members.append(
-                    self._member_from_points(
-                        host,
-                        "HEADER_BOTTOM_PLATE",
-                        start,
-                        end,
-                        plate_family,
-                        plate_type,
-                        False,
-                        PLATE_ROTATION,
-                        PLATE_THICKNESS,
-                        plate_depth,
-                    )
+            else:
+                asm_members, reservation = door_asm.generate(
+                    self, host, None, opening, spacing, occupied
                 )
-
-                header_bottom = host.base_elevation + opening.head_height + PLATE_THICKNESS
-                header_center = header_bottom + header_depth * 0.5
-                for lateral in _header_ply_lateral_offsets(
-                        host,
-                        int(getattr(self.config, "header_count", MIN_HEADER_PLY_COUNT)),
-                        header_width):
-                    start = host.point_at_abs(span_left, header_center, lateral)
-                    end = host.point_at_abs(span_right, header_center, lateral)
-                    members.append(
-                        self._member_from_points(
-                            host,
-                            "HEADER",
-                            start,
-                            end,
-                            header_family,
-                            header_type,
-                            False,
-                            HEADER_ROTATION,
-                            header_depth,
-                            header_width,
-                        )
-                    )
-                header_top = header_bottom + header_depth
-                top_plate_center = header_top + PLATE_THICKNESS * 0.5
-                start = host.point_at_abs(span_left, top_plate_center)
-                end = host.point_at_abs(span_right, top_plate_center)
-                members.append(
-                    self._member_from_points(
-                        host,
-                        "HEADER_TOP_PLATE",
-                        start,
-                        end,
-                        plate_family,
-                        plate_type,
-                        False,
-                        PLATE_ROTATION,
-                        PLATE_THICKNESS,
-                        plate_depth,
-                    )
-                )
-                header_stack_top = header_top + PLATE_THICKNESS
-
-            if getattr(self.config, "include_cripple_studs", True):
-                top_bound = _top_bound_at_d(host.outer_loop, (left + right) * 0.5)
-                if top_bound is not None:
-                    top_z = top_bound - self._top_plate_stack()
-                    if header_stack_top < top_z - MIN_MEMBER_LENGTH:
-                        members.extend(
-                            self._cripples(host, left, right, header_stack_top, top_z, occupied)
-                        )
-
-            if opening.is_window and opening.sill_height > self._stud_bottom():
-                sill_center = host.base_elevation + opening.sill_height - PLATE_THICKNESS * 0.5
-                start = host.point_at_abs(left, sill_center)
-                end = host.point_at_abs(right, sill_center)
-                members.append(
-                    self._member_from_points(
-                        host,
-                        "SILL_PLATE",
-                        start,
-                        end,
-                        self.config.bottom_plate_family_name or self.config.stud_family_name,
-                        self.config.bottom_plate_type_name or self.config.stud_type_name,
-                        False,
-                        PLATE_ROTATION,
-                        PLATE_THICKNESS,
-                        self._wall_member_depth(
-                            host,
-                            self.config.bottom_plate_family_name or self.config.stud_family_name,
-                            self.config.bottom_plate_type_name or self.config.stud_type_name,
-                            False,
-                        ),
-                    )
-                )
-                if getattr(self.config, "include_cripple_studs", True):
-                    bottom_z = _bottom_bound_at_d(host.outer_loop, (left + right) * 0.5)
-                    if bottom_z is None:
-                        bottom_z = host.base_elevation
-                    bottom_z += self._stud_bottom()
-                    top_z = host.base_elevation + opening.sill_height - PLATE_THICKNESS
-                    if top_z > bottom_z + MIN_MEMBER_LENGTH:
-                        members.extend(
-                            self._cripples(host, left, right, bottom_z, top_z, occupied)
-                        )
-
-        return [member for member in members if member is not None]
+            members.extend([m for m in asm_members if m is not None])
+        return members
 
     def _opening_assemblies(self, host, node, occupied, spacing):
         """Generate opening assemblies using WindowAssembly / DoorAssembly.
