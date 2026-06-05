@@ -519,6 +519,103 @@ def _element_id_text(element_id):
     return str(value)
 
 
+def _get_section_view_family_type(doc):
+    for vft in DB.FilteredElementCollector(doc).OfClass(DB.ViewFamilyType):
+        if vft.ViewFamily == DB.ViewFamily.Section:
+            return vft
+    return None
+
+
+def _create_wall_elevation(doc, wall):
+    loc = wall.Location
+    if not loc or not hasattr(loc, "Curve"):
+        return None
+    curve = loc.Curve
+    p0 = curve.GetEndPoint(0)
+    p1 = curve.GetEndPoint(1)
+    
+    length = (p1 - p0).GetLength()
+    if length < 0.001:
+        return None
+        
+    w_dir = (p1 - p0).Normalize()
+    midpoint = (p0 + p1) * 0.5
+    
+    bbox = wall.get_BoundingBox(None)
+    if bbox:
+        z_min = bbox.Min.Z
+        z_max = bbox.Max.Z
+        wall_height = z_max - z_min
+        wall_base_z = z_min
+    else:
+        wall_height = 10.0
+        wall_base_z = p0.Z
+        
+    # Get wall thickness
+    thickness = wall.WallType.Width
+    
+    # Calculate transform basis vectors
+    basis_x = w_dir
+    basis_y = DB.XYZ.BasisZ
+    basis_z = basis_x.CrossProduct(basis_y).Normalize()
+    
+    # Offset the cut plane (origin) in front of the wall face
+    offset = thickness + 2.0  # 2 feet in front of wall face
+    origin = DB.XYZ(midpoint.X, midpoint.Y, wall_base_z) + basis_z * offset
+    
+    transform = DB.Transform.Identity
+    transform.Origin = origin
+    transform.BasisX = basis_x
+    transform.BasisY = basis_y
+    transform.BasisZ = basis_z
+    
+    # Bounding Box
+    section_box = DB.BoundingBoxXYZ()
+    section_box.Transform = transform
+    
+    margin_x = 1.0
+    margin_y = 1.0
+    far_clip = thickness * 2.0 + 4.0
+    
+    section_box.Min = DB.XYZ(-length/2.0 - margin_x, -margin_y, -far_clip)
+    section_box.Max = DB.XYZ(length/2.0 + margin_x, wall_height + margin_y, 0.1)
+    
+    vft = _get_section_view_family_type(doc)
+    if not vft:
+        return None
+        
+    view_name = "Wall Elevation - {}".format(wall.Id.IntegerValue)
+    
+    # Check for existing view and delete it
+    views = DB.FilteredElementCollector(doc).OfClass(DB.View).WhereElementIsNotElementType()
+    for v in views:
+        if v.Name == view_name:
+            try:
+                doc.Delete(v.Id)
+            except Exception:
+                # If we cannot delete it, append unique suffix
+                import time
+                view_name = "Wall Elevation - {} - {}".format(wall.Id.IntegerValue, int(time.time() % 1000))
+            break
+            
+    # Create the section view
+    view_section = DB.ViewSection.CreateSection(doc, vft.Id, section_box)
+    view_section.Name = view_name
+    
+    # Set view settings
+    view_section.DetailLevel = DB.ViewDetailLevel.Fine
+    view_section.DisplayStyle = DB.DisplayStyle.HLR
+    
+    # Set category overrides (OST_Walls transparency)
+    wall_cat_id = DB.ElementId(DB.BuiltInCategory.OST_Walls)
+    if view_section.IsCategoryOverridable(wall_cat_id):
+        overrides = DB.OverrideGraphicSettings()
+        overrides.SetSurfaceTransparency(85)
+        view_section.SetCategoryOverrides(wall_cat_id, overrides)
+        
+    return view_section
+
+
 def main():
     doc = revit.doc
 
@@ -566,6 +663,7 @@ def main():
     deleted_counts = {"wall_v4": 0, "wall_v2": 0, "wall": 0, "wall_join": 0}
     audit_rows = []
     topology_summary = ""
+    created_views = []
 
     with revit.Transaction("WF: Wall Framing"):
         deleted_counts = _delete_existing_wall_members(
@@ -688,6 +786,17 @@ def main():
         # ----------------------------------------------------------------
         validator.run_pass2(placed_instances_map)
 
+        # ----------------------------------------------------------------
+        # Generate Wall Elevation Views.
+        # ----------------------------------------------------------------
+        for wall in walls:
+            try:
+                view_section = _create_wall_elevation(doc, wall)
+                if view_section:
+                    created_views.append((wall.Id.IntegerValue, view_section))
+            except Exception as e:
+                logger.warning("Failed to create elevation for wall {}: {}".format(wall.Id.IntegerValue, e))
+
     validation_text = validator.report.summary_text() if 'validator' in dir() else ""
 
     audit_table = (
@@ -713,6 +822,13 @@ def main():
         + deleted_counts.get("wall_join", 0)
     )
 
+    elevation_links_text = ""
+    if created_views:
+        elevation_links_text = "\n### Created Elevation Views\n"
+        for wall_id, view in created_views:
+            link = output.linkify(view.Id, title="Wall Elevation - {}".format(wall_id))
+            elevation_links_text += "- {}\n".format(link)
+
     output.print_md(
         "## Wall Framing Complete\n"
         "- **Engine:** {0}\n"
@@ -723,7 +839,8 @@ def main():
         "{5}"
         "{6}"
         "{7}"
-        "{8}".format(
+        "{8}"
+        "{9}".format(
             ENGINE_NAME,
             wall_count,
             skipped,
@@ -733,6 +850,7 @@ def main():
             ("\n" + validation_text + "\n") if validation_text else "",
             audit_table,
             side_stud_table,
+            elevation_links_text,
         )
     )
 
