@@ -443,16 +443,39 @@ class WallTopologyGraph(object):
                 self._analyse_pair(self.nodes[i], self.nodes[j])
 
     def determine_ownership(self):
-        """Assign owner/secondary to each edge (lowest ElementId wins)."""
+        """Assign owner/secondary to each edge geometrically, falling back to lowest ElementId."""
         for edge in self.edges:
-            id_a = edge.node_a.element_id_int
-            id_b = edge.node_b.element_id_int
-            if id_a <= id_b:
-                edge.owner_node = edge.node_a
-                edge.secondary_node = edge.node_b
-            else:
-                edge.owner_node = edge.node_b
-                edge.secondary_node = edge.node_a
+            node_a = edge.node_a
+            node_b = edge.node_b
+            id_a = node_a.element_id_int
+            id_b = node_b.element_id_int
+
+            owner = None
+            if edge.is_t:
+                # Main wall is owner, branch wall is secondary
+                if edge.end_index_a is None and edge.end_index_b is not None:
+                    owner = node_a
+                elif edge.end_index_b is None and edge.end_index_a is not None:
+                    owner = node_b
+            elif edge.is_corner:
+                # Compare physical outboard extensions to see which wall is the through wall
+                ha = node_a.host
+                hb = node_b.host
+                if ha is not None and hb is not None:
+                    ext_a = (edge.d_a - ha.raw_domain_start) if edge.end_index_a == 0 else (ha.raw_domain_end - edge.d_a)
+                    ext_b = (edge.d_b - hb.raw_domain_start) if edge.end_index_b == 0 else (hb.raw_domain_end - edge.d_b)
+                    
+                    if ext_a > ext_b + 0.05:
+                        owner = node_a
+                    elif ext_b > ext_a + 0.05:
+                        owner = node_b
+
+            if owner is None:
+                # Fallback to lowest ElementId
+                owner = node_a if id_a <= id_b else node_b
+
+            edge.owner_node = owner
+            edge.secondary_node = node_b if owner is node_a else node_a
 
     def compute_layout(self, spacing):
         """BFS propagation of LayoutPhase from the root wall outward.
