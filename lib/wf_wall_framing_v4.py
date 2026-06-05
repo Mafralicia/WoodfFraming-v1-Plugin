@@ -1,10 +1,18 @@
 # -*- coding: utf-8 -*-
-"""Wall Framing 4.0 - wall-cavity driven framing engine.
+"""Wall Framing 4.0 - topology-aware wall-cavity framing engine.
 
-This engine keeps the existing 2.0 command UI but replaces the framing model.
-It uses the selected wall side face as the wall profile, builds scanline
-intervals from the actual face loops, and validates candidate members against
-the wall solid before they are handed to the shared placement service.
+This engine extends the 4.0 cavity engine with a topology graph that allows
+corner assemblies, T-intersection backing, and continuous stud-spacing
+propagation to be generated correctly for multi-wall framing runs.
+
+New in this version
+-------------------
+* WallTopologyGraph integration: calculate_members accepts graph= parameter.
+* Corner assemblies via CornerAssemblyGenerator (two-stud, california, three-stud).
+* T-intersection assemblies via TIntersectionGenerator.
+* Opening assemblies via WindowAssembly / DoorAssembly.
+* Reserved-region system: infill studs respect topology + opening reservations.
+* Continuous LayoutPhase propagation through corners and T-joins.
 """
 
 import math
@@ -26,9 +34,23 @@ from wf_host import (
     _select_target_layer,
 )
 from wf_placement import BaseFramingEngine
+from wf_wall_topology import (
+    MemberKind,
+    Reservation,
+    ReservationPriority,
+    is_d_reserved,
+)
+from wf_wall_assemblies import (
+    CornerAssemblyGenerator,
+    TIntersectionGenerator,
+    WindowAssembly,
+    DoorAssembly,
+    PLATE_THICKNESS as ASM_PLATE_THICKNESS,
+    STUD_THICKNESS as ASM_STUD_THICKNESS,
+)
 
 
-ENGINE_NAME = "wall-framing-4.0-cavity"
+ENGINE_NAME = "wall-framing-5.0-topology"
 MIN_MEMBER_LENGTH = inches_to_feet(1.0)
 PLATE_THICKNESS = inches_to_feet(1.5)
 STUD_THICKNESS = inches_to_feet(1.5)
@@ -44,15 +66,7 @@ PROFILE_EDGE_TOL = STUD_THICKNESS * 2.0
 OPENING_STUD_COLLISION_TOL = STUD_THICKNESS * 0.45
 HEADER_PLY_SPACER = inches_to_feet(0.5)
 MIN_HEADER_PLY_COUNT = 2
-OPENING_FRAME_MEMBER_TYPES = set([
-    "HEADER",
-    "HEADER_BOTTOM_PLATE",
-    "HEADER_TOP_PLATE",
-    "JACK_STUD",
-    "KING_STUD",
-    "SILL_PLATE",
-    "CRIPPLE_STUD",
-])
+OPENING_FRAME_MEMBER_TYPES = MemberKind.ASSEMBLY_KINDS
 
 
 class WallCavityOpeningV4(object):
@@ -131,19 +145,97 @@ class WallCavityHostInfoV4(object):
 
 
 class WallCavityFramingV4Engine(BaseFramingEngine):
-    """Calculate and place wall framing from actual wall face intervals."""
+    """Calculate and place wall framing from actual wall face intervals.
 
-    def calculate_members(self, wall):
+    When a :class:`~wf_wall_topology.WallTopologyGraph` is passed in, the
+    engine uses topology-aware generation:
+
+    1. Retrieves the node for this wall from the graph.
+    2. Generates corner/T assembly members for edges where this wall is owner.
+    3. Registers reservation zones from edges where this wall is secondary.
+    4. Generates opening assemblies with WindowAssembly / DoorAssembly.
+    5. Generates infill studs using the node's LayoutPhase, skipping reserved
+       regions so layout and assemblies never collide.
+    """
+
+    def calculate_members(self, wall, graph=None):
+        """Calculate all framing members for *wall*.
+
+        Parameters
+        ----------
+        wall : Revit Wall element
+        graph : WallTopologyGraph or None
+            If provided the engine uses topology-aware assembly and layout
+            generation.  If None, falls back to single-wall mode.
+        """
         host = self._analyze_wall(wall)
         if host is None:
             return [], None
 
         occupied = set()
         members = []
+
+        # ----------------------------------------------------------------
+        # Retrieve or create the topology node for this wall.
+        # ----------------------------------------------------------------
+        node = None
+        if graph is not None:
+            node = graph.node_for_host(host)
+
+        # ----------------------------------------------------------------
+        # Phase 0 – assembly reservations from the topology graph.
+        # ----------------------------------------------------------------
+        if node is not None:
+            corner_gen = CornerAssemblyGenerator(self.config)
+            t_gen = TIntersectionGenerator(self.config)
+
+            for edge in graph.edges_for_node(node):
+                if edge.owner_node is node:
+                    # This wall owns the join — generate the assembly.
+                    if edge.is_corner:
+                        asm_members = corner_gen.generate(self, edge)
+                        members.extend(asm_members)
+                        for m in asm_members:
+                            d = _member_d_approx(host, m)
+                            if d is not None:
+                                occupied.add(round(d, 4))
+                    elif edge.is_t:
+                        asm_members = t_gen.generate(self, edge)
+                        members.extend(asm_members)
+                        for m in asm_members:
+                            d = _member_d_approx(host, m)
+                            if d is not None:
+                                occupied.add(round(d, 4))
+                else:
+                    # Secondary wall — the owner generated the assembly.
+                    # Pull the reservation that the generator registered on
+                    # this node so that our infill solver respects it.
+                    # (Reservations are added to node by the generator above
+                    # when it ran on the owner.  They are already present
+                    # because we process all walls in a single batch.)
+                    pass  # reservations already on node.reservations
+
+        # ----------------------------------------------------------------
+        # Wall-shape members (plates, side studs).
+        # ----------------------------------------------------------------
         members.extend(self._wall_shape_members(host, occupied))
-        members.extend(self._opening_members(host, occupied))
-        members.extend(self._infill_members(host, occupied))
+
+        # ----------------------------------------------------------------
+        # Opening assemblies (replaces the old member-by-member method).
+        # ----------------------------------------------------------------
+        spacing = self.config.stud_spacing_ft
+        if node is not None:
+            members.extend(self._opening_assemblies(host, node, occupied, spacing))
+        else:
+            members.extend(self._opening_members(host, occupied))
+
+        # ----------------------------------------------------------------
+        # Infill members.
+        # ----------------------------------------------------------------
+        members.extend(self._infill_members(host, occupied, node))
+
         host.audit["member_count"] = len(members)
+        host.audit["topology_node"] = node is not None
         return members, host
 
     # ------------------------------------------------------------------
@@ -959,10 +1051,33 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
 
         return [member for member in members if member is not None]
 
-    def _infill_members(self, host, occupied):
+    def _opening_assemblies(self, host, node, occupied, spacing):
+        """Generate opening assemblies using WindowAssembly / DoorAssembly.
+
+        Adds opening reservations to the topology node so that infill studs
+        cannot enter the opening framing zone.
+        """
+        members = []
+        win_asm = WindowAssembly(self.config)
+        door_asm = DoorAssembly(self.config)
+        for opening in host.openings:
+            if opening.is_window:
+                asm_members, reservation = win_asm.generate(
+                    self, host, opening, spacing, occupied
+                )
+            else:
+                asm_members, reservation = door_asm.generate(
+                    self, host, opening, spacing, occupied
+                )
+            members.extend([m for m in asm_members if m is not None])
+            if reservation is not None and node is not None:
+                node.add_reservation(reservation)
+        return members
+
+    def _infill_members(self, host, occupied, node=None):
         members = []
         members.extend(self._mid_plates(host))
-        members.extend(self._regular_studs(host, occupied))
+        members.extend(self._regular_studs(host, occupied, node))
         members.extend(self._blocking(host, occupied))
         return members
 
@@ -1006,34 +1121,54 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
             z_abs += interval
         return [member for member in members if member is not None]
 
-    def _regular_studs(self, host, occupied):
+    def _regular_studs(self, host, occupied, node=None):
+        """Place layout studs using continuous LayoutPhase when available.
+
+        Stations produced by LayoutPhase.stations_in_range() are used when
+        a topology node is provided, which ensures global spacing continuity.
+        Stations that fall inside any active reservation on the node are
+        skipped so that assembly zones are never invaded by infill studs.
+        Assembly-required studs take precedence over spacing continuity.
+        """
         members = []
         spacing = self.config.stud_spacing_ft
         if spacing <= 0.0:
             return members
 
+        # Gather active reservations for this wall.
+        reservations = getattr(node, "reservations", []) if node else []
+
         for segment in _segments_by_kind(host, "bottom"):
             d_min = max(0.0, segment.d_min())
             d_max = min(host.length, segment.d_max())
-            d = _next_spacing_station(d_min, spacing)
-            while d < d_max - STUD_THICKNESS * 0.5:
-                if not _in_opening_zone(host.openings, d) and not _near(d, occupied, STUD_THICKNESS):
-                    intervals = _vertical_intervals(host.outer_loop, [], d)
-                    for bottom_z, top_z in intervals:
-                        bottom_z += self._stud_bottom()
-                        top_z -= self._top_plate_stack()
-                        member = self._vertical_member_at_d(
-                            host,
-                            "STUD",
-                            d,
-                            bottom_z,
-                            top_z,
-                            False,
-                        )
-                        if member is not None:
-                            members.append(member)
-                            occupied.add(round(d, 4))
-                d += spacing
+
+            if node is not None and node.layout_phase_set:
+                # Topology mode: use continuous LayoutPhase stations.
+                station_iter = node.layout_phase.stations_in_range(
+                    d_min, d_max, spacing
+                )
+            else:
+                # Fallback: local spacing starting from wall start.
+                station_iter = _local_stations(d_min, d_max, spacing)
+
+            for d in station_iter:
+                # Skip if inside any reservation zone.
+                if is_d_reserved(d, reservations):
+                    continue
+                if _in_opening_zone(host.openings, d):
+                    continue
+                if _near(d, occupied, STUD_THICKNESS):
+                    continue
+                intervals = _vertical_intervals(host.outer_loop, [], d)
+                for bottom_z, top_z in intervals:
+                    bottom_z += self._stud_bottom()
+                    top_z -= self._top_plate_stack()
+                    member = self._vertical_member_at_d(
+                        host, MemberKind.STUD, d, bottom_z, top_z, False,
+                    )
+                    if member is not None:
+                        members.append(member)
+                        occupied.add(round(d, 4))
         return members
 
     def _blocking(self, host, occupied):
@@ -2132,3 +2267,50 @@ def _element_id_text(element_id):
     if value is None:
         return None
     return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Topology helpers added for v5.0
+# ---------------------------------------------------------------------------
+
+def _local_stations(d_min, d_max, spacing):
+    """Fallback generator: evenly spaced stations starting from d_min.
+
+    Used when no topology LayoutPhase is available (single-wall mode).
+
+    Yields
+    ------
+    float
+        Each station distance.
+    """
+    if spacing <= 1e-9:
+        return
+    import math
+    first = math.ceil((d_min + STUD_THICKNESS * 0.5) / spacing) * spacing
+    d = first
+    while d < d_max - STUD_THICKNESS * 0.5:
+        yield d
+        d += spacing
+
+
+def _member_d_approx(host, member):
+    """Project the midpoint of a member back onto the host wall d-axis.
+
+    Used to register assembly stud positions into the occupied set so that
+    infill studs are not placed at the same location.
+
+    Returns None if the member's start/end points are missing.
+    """
+    start = getattr(member, "start_point", None)
+    end = getattr(member, "end_point", None)
+    if start is None or end is None:
+        return None
+    try:
+        mid_x = (start.X + end.X) * 0.5
+        mid_y = (start.Y + end.Y) * 0.5
+        from Autodesk.Revit.DB import XYZ
+        mid = XYZ(mid_x, mid_y, host.base_elevation)
+        vec = mid - host.start_point
+        return vec.DotProduct(host.direction)
+    except Exception:
+        return None

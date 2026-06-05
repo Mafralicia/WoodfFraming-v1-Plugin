@@ -83,6 +83,12 @@ class FramingConfig(object):
         self.include_king_studs = True
         self.include_jack_studs = True
 
+        # Assembly styles for topology-aware framing
+        # corner_style: "two_stud" | "california" | "three_stud"
+        self.corner_style = "three_stud"
+        # t_intersection_style: "ladder_blocking" | "backing_stud" | "three_stud_t"
+        self.t_intersection_style = "three_stud_t"
+
         # Offsets (feet)
         self.wall_center_offset = 0.0
 
@@ -136,6 +142,8 @@ class FramingConfig(object):
             "include_corner_studs": self.include_corner_studs,
             "include_cripple_studs": self.include_cripple_studs,
             "include_king_studs": self.include_king_studs,
+            "corner_style": self.corner_style,
+            "t_intersection_style": self.t_intersection_style,
             "include_jack_studs": self.include_jack_studs,
             "wall_center_offset": self.wall_center_offset,
             "wall_layer_mode": self.wall_layer_mode,

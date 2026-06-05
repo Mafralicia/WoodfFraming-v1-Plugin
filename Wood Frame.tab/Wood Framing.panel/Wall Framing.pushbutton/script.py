@@ -34,6 +34,8 @@ from wf_families import (
 )
 from wf_tracking import get_tracking_data
 from wf_wall_framing_v4 import ENGINE_NAME, WallCavityFramingV4Engine
+from wf_wall_topology import WallTopologyGraph
+from wf_wall_validation import FramingValidator
 
 
 logger = script.get_logger()
@@ -450,6 +452,7 @@ def main():
     skipped = 0
     deleted_counts = {"wall_v4": 0, "wall_v2": 0, "wall": 0, "wall_join": 0}
     audit_rows = []
+    topology_summary = ""
 
     with revit.Transaction("WF: Wall Framing"):
         deleted_counts = _delete_existing_wall_members(
@@ -457,15 +460,71 @@ def main():
             walls,
             bool(getattr(config, "clean_existing_wall_members", True)),
         )
+
+        # ----------------------------------------------------------------
+        # Build the topology graph for all selected walls.
+        # ----------------------------------------------------------------
+        hosts = []
+        host_map = {}  # wall_id_text -> (members, host)
         for wall in walls:
-            members, host = engine.calculate_members(wall)
+            _members, host = engine.calculate_members(wall)  # analyse geometry
+            if host is not None:
+                hosts.append(host)
+                host_map[_element_id_text(getattr(host, "element_id", None))] = ([], host)
+
+        graph = None
+        if len(hosts) > 1:
+            try:
+                graph = WallTopologyGraph(hosts)
+                graph.build()
+                graph.determine_ownership()
+                graph.compute_layout(config.stud_spacing_ft)
+                topology_summary = graph.audit_summary()
+            except Exception as exc:
+                topology_summary = "Topology graph error: {0}".format(exc)
+                graph = None
+
+        # ----------------------------------------------------------------
+        # Generate all framing members (topology-aware when graph is set).
+        # ----------------------------------------------------------------
+        wall_members_map = {}  # wall_id_text -> [members]
+        host_info_map = {}     # wall_id_text -> host
+        skipped_walls = []
+
+        for wall in walls:
+            members, host = engine.calculate_members(wall, graph=graph)
             if host is None:
                 skipped += 1
+                skipped_walls.append(getattr(wall, "Id", None))
                 continue
+            wid = _element_id_text(getattr(host, "element_id", None))
+            wall_members_map[wid] = [m for m in members if m is not None]
+            host_info_map[wid] = host
+
+        # ----------------------------------------------------------------
+        # Pass 1 – Analytical validation (before placement).
+        # ----------------------------------------------------------------
+        validator = FramingValidator(graph, wall_members_map)
+        pass1_ok = validator.run_pass1()
+
+        # ----------------------------------------------------------------
+        # Place members in Revit.
+        # ----------------------------------------------------------------
+        placed_instances_map = {}
+        for wid, members in wall_members_map.items():
+            host = host_info_map[wid]
             placed = engine.place_members(members, host)
             wall_count += 1
             member_count += len(placed)
+            placed_instances_map[wid] = placed
             audit_rows.append((getattr(host, "audit", {}), len(placed)))
+
+        # ----------------------------------------------------------------
+        # Pass 2 – Placement validation (after placement).
+        # ----------------------------------------------------------------
+        validator.run_pass2(placed_instances_map)
+
+    validation_text = validator.report.summary_text() if 'validator' in dir() else ""
 
     audit_table = (
         "\n### Source Geometry Audit\n"
@@ -498,12 +557,16 @@ def main():
         "- **Previous members replaced:** {3}\n"
         "- **Members placed:** {4}\n"
         "{5}"
-        "{6}".format(
+        "{6}"
+        "{7}"
+        "{8}".format(
             ENGINE_NAME,
             wall_count,
             skipped,
             deleted_total,
             member_count,
+            ("\n### Topology Graph\n```\n" + topology_summary + "\n```\n") if topology_summary else "",
+            ("\n" + validation_text + "\n") if validation_text else "",
             audit_table,
             side_stud_table,
         )
