@@ -1311,6 +1311,28 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         if start is None or end is None:
             return []
 
+        # For bottom and top plates, trim the validation sample lines to the wall's location domain [0.0, host.length]
+        # to prevent rejection when plates are extended outboard into corner joins.
+        member_type = getattr(member, "member_type", None)
+        if member_type in ("BOTTOM_PLATE", "TOP_PLATE"):
+            try:
+                d_start = (start - host.start_point).DotProduct(host.direction)
+                d_end = (end - host.start_point).DotProduct(host.direction)
+                
+                trimmed_d_start = max(0.0, min(host.length, d_start))
+                trimmed_d_end = max(0.0, min(host.length, d_end))
+                
+                denom = d_end - d_start
+                if abs(denom) > 1e-9:
+                    t_start = (trimmed_d_start - d_start) / denom
+                    t_end = (trimmed_d_end - d_start) / denom
+                    p0 = start
+                    p1 = end
+                    start = p0 + (p1 - p0) * t_start
+                    end = p0 + (p1 - p0) * t_end
+            except Exception:
+                pass
+
         if getattr(member, "is_column", False):
             width_axis = host.direction
             depth_axis = host.into_wall
