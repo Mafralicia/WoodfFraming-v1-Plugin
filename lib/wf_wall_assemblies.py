@@ -455,9 +455,9 @@ class TIntersectionGenerator(object):
                 role = MemberKind.T_BACKING_STUD if idx != 1 else MemberKind.T_NAILER
             m = _make_vertical(
                 main_host, role, d, bottom_m, top_m,
-                family, type_name, False,
+                family, type_name, True,
                 STUD_THICKNESS,
-                engine._wall_member_depth(main_host, family, type_name, False),
+                engine._wall_member_depth(main_host, family, type_name, True),
             )
             if m:
                 members.append(m)
