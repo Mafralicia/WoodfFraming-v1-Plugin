@@ -85,7 +85,12 @@ class JoinBoundaryResolver(object):
         sec_outer_face_offset = -owner_sign * (sec_depth * 0.5)
         owner_outer_boundary = d_owner + sec_outer_face_offset
         owner_end_d = owner_outer_boundary + owner_sign * stud_half
-        owner_end_d = max(stud_half, min(host_owner.length - stud_half, owner_end_d))
+        
+        # Allow d to extend past analytical endpoints by the secondary depth,
+        # since the physical wall solid extends through the corner join.
+        owner_lower = -sec_depth
+        owner_upper = host_owner.length + sec_depth
+        owner_end_d = max(owner_lower, min(owner_upper, owner_end_d))
 
         # The secondary wall terminates flush against the inner framing face of the owner wall.
         # The inner face of the owner wall framing is in the inboard direction relative to secondary centerline.
@@ -93,7 +98,10 @@ class JoinBoundaryResolver(object):
         owner_inner_face_offset = secondary_sign * (owner_depth * 0.5)
         sec_inner_boundary = d_secondary + owner_inner_face_offset
         secondary_end_d = sec_inner_boundary + secondary_sign * stud_half
-        secondary_end_d = max(stud_half, min(host_secondary.length - stud_half, secondary_end_d))
+        
+        sec_lower = -owner_depth
+        sec_upper = host_secondary.length + owner_depth
+        secondary_end_d = max(sec_lower, min(sec_upper, secondary_end_d))
 
         owner_studs = [owner_end_d]
         secondary_studs = [secondary_end_d]
@@ -101,13 +109,13 @@ class JoinBoundaryResolver(object):
         if corner_style in ("california", "three_stud"):
             # Add a backing stud one stud-thickness inboard on the owner.
             backing_d = owner_end_d + owner_sign * STUD_THICKNESS
-            backing_d = max(stud_half, min(host_owner.length - stud_half, backing_d))
+            backing_d = max(owner_lower, min(owner_upper, backing_d))
             owner_studs.append(backing_d)
 
         if corner_style == "three_stud":
             # Add a return stud one stud-thickness inboard on the secondary.
             return_d = secondary_end_d + secondary_sign * STUD_THICKNESS
-            return_d = max(stud_half, min(host_secondary.length - stud_half, return_d))
+            return_d = max(sec_lower, min(sec_upper, return_d))
             secondary_studs.append(return_d)
 
         # Build reservations wide enough to exclude infill from this zone.
@@ -570,16 +578,18 @@ class WindowAssembly(object):
 
         # Sill plates (configurable count).
         sill_count = int(getattr(self.config, "sill_plate_count", 2))
+        placed_sill_count = 0
         for i in range(sill_count):
-            offset = (i + 0.5) * PLATE_THICKNESS
-            sill_center_z = host.base_elevation + opening.sill_height - offset
-            if opening.sill_height > PLATE_THICKNESS * (plate_bottom + i) + MIN_MEMBER_LENGTH:
+            if opening.sill_height >= PLATE_THICKNESS * (plate_bottom + i + 1) + MIN_MEMBER_LENGTH:
+                offset = (i + 0.5) * PLATE_THICKNESS
+                sill_center_z = host.base_elevation + opening.sill_height - offset
                 # Spans from left - STUD_THICKNESS to right + STUD_THICKNESS (across jack studs, butting into king studs)
                 m = _make_horizontal(host, MemberKind.SILL_PLATE,
                                       left - STUD_THICKNESS, right + STUD_THICKNESS, sill_center_z,
                                       plate_family, plate_type, PLATE_THICKNESS, plate_depth)
                 if m:
                     members.append(m)
+                    placed_sill_count += 1
 
         # Header bottom plate.
         header_bp_z = host.base_elevation + opening.head_height + PLATE_THICKNESS * 0.5
@@ -634,7 +644,7 @@ class WindowAssembly(object):
 
         # Cripple studs below sill.
         if getattr(self.config, "include_cripple_studs", True):
-            sill_stack_bottom = host.base_elevation + opening.sill_height - PLATE_THICKNESS * sill_count
+            sill_stack_bottom = host.base_elevation + opening.sill_height - PLATE_THICKNESS * placed_sill_count
             if sill_stack_bottom > bottom_z + MIN_MEMBER_LENGTH:
                 members.extend(_cripples(
                     engine, host, node, left, right, bottom_z, sill_stack_bottom,
