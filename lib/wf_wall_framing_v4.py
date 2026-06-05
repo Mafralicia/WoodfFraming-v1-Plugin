@@ -202,7 +202,7 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                         members.extend(asm_members)
                         for m in asm_members:
                             m_host_id = getattr(m, "host_id", None)
-                            if m_host_id is not None and str(m_host_id.IntegerValue if hasattr(m_host_id, "IntegerValue") else m_host_id) == str(host.element_id.IntegerValue if hasattr(host.element_id, "IntegerValue") else host.element_id):
+                            if m_host_id is not None and _element_id_text(m_host_id) == _element_id_text(host.element_id):
                                 d = _member_d_approx(host, m)
                                 if d is not None:
                                     occupied.add(round(d, 4))
@@ -211,7 +211,7 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                         members.extend(asm_members)
                         for m in asm_members:
                             m_host_id = getattr(m, "host_id", None)
-                            if m_host_id is not None and str(m_host_id.IntegerValue if hasattr(m_host_id, "IntegerValue") else m_host_id) == str(host.element_id.IntegerValue if hasattr(host.element_id, "IntegerValue") else host.element_id):
+                            if m_host_id is not None and _element_id_text(m_host_id) == _element_id_text(host.element_id):
                                 d = _member_d_approx(host, m)
                                 if d is not None:
                                     occupied.add(round(d, 4))

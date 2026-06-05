@@ -471,10 +471,11 @@ def main():
         # ----------------------------------------------------------------
         # Collect all walls in the document to find joins/intersections
         all_db_walls = list(DB.FilteredElementCollector(doc).OfClass(DB.Wall).WhereElementIsNotElementType())
-        selected_wall_ids = {w.Id.IntegerValue for w in walls}
+        selected_wall_ids = {_element_id_text(w.Id) for w in walls}
         context_walls = []
         for db_wall in all_db_walls:
-            if db_wall.Id.IntegerValue in selected_wall_ids:
+            db_wall_id = _element_id_text(db_wall.Id)
+            if db_wall_id in selected_wall_ids:
                 continue
             loc_curve = db_wall.Location
             if loc_curve and hasattr(loc_curve, "Curve"):
@@ -483,7 +484,7 @@ def main():
                     joined_elems = loc_curve.get_ElementsAtJoin(end_idx)
                     if joined_elems:
                         for elem_id in joined_elems:
-                            if elem_id.IntegerValue in selected_wall_ids:
+                            if _element_id_text(elem_id) in selected_wall_ids:
                                 joined_to_selected = True
                                 break
                     if joined_to_selected:
