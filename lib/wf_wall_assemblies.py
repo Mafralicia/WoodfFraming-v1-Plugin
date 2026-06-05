@@ -292,8 +292,19 @@ def _make_horizontal(host, kind, start_d, end_d, z_abs,
     return m
 
 
-def _stud_z_range(host, plate_bottom_count, plate_top_count):
+def _stud_z_range(host, plate_bottom_count, plate_top_count, d=None):
     bottom_abs_z = host.base_elevation + PLATE_THICKNESS * plate_bottom_count
+    
+    if d is not None:
+        try:
+            from wf_wall_framing_v4 import _vertical_bounds
+            bounds = _vertical_bounds(host.outer_loop, d)
+            if bounds is not None:
+                top_abs_z = bounds[1] - PLATE_THICKNESS * plate_top_count
+                return bottom_abs_z, top_abs_z
+        except Exception:
+            pass
+            
     top_abs_z = (max(z for _, z in host.outer_loop)
                  - PLATE_THICKNESS * plate_top_count)
     return bottom_abs_z, top_abs_z
@@ -346,10 +357,9 @@ class CornerAssemblyGenerator(object):
         type_name = self.config.stud_type_name
         plate_bottom = int(getattr(self.config, "bottom_plate_count", 1))
         plate_top = int(getattr(self.config, "top_plate_count", 2))
-
         members = []
-        bottom_z, top_z = _stud_z_range(owner_host, plate_bottom, plate_top)
-
+        bottom_z, top_z = _stud_z_range(owner_host, plate_bottom, plate_top, d_owner)
+ 
         # Owner studs.
         role_map = [MemberKind.CORNER_STUD, MemberKind.CORNER_BACKING_STUD]
         for idx, d in enumerate(positions["owner"]):
@@ -362,9 +372,9 @@ class CornerAssemblyGenerator(object):
             )
             if m:
                 members.append(m)
-
+ 
         # Secondary studs.
-        bottom_z_s, top_z_s = _stud_z_range(secondary_host, plate_bottom, plate_top)
+        bottom_z_s, top_z_s = _stud_z_range(secondary_host, plate_bottom, plate_top, d_secondary)
         role_map_s = [MemberKind.CORNER_STUD, MemberKind.CORNER_RETURN_STUD]
         for idx, d in enumerate(positions["secondary"]):
             role = role_map_s[min(idx, len(role_map_s) - 1)]
@@ -442,8 +452,8 @@ class TIntersectionGenerator(object):
         plate_type = self.config.bottom_plate_type_name or type_name
 
         members = []
-        bottom_m, top_m = _stud_z_range(main_host, plate_bottom, plate_top)
-        bottom_b, top_b = _stud_z_range(branch_host, plate_bottom, plate_top)
+        bottom_m, top_m = _stud_z_range(main_host, plate_bottom, plate_top, d_main)
+        bottom_b, top_b = _stud_z_range(branch_host, plate_bottom, plate_top, d_branch)
 
         # Main wall members.
         for idx, d in enumerate(positions["main"]):
@@ -565,7 +575,8 @@ class WindowAssembly(object):
         # King studs – full height.
         for d, label in ((king_left, "king_L"), (king_right, "king_R")):
             if 0.0 <= d <= host.length:
-                m = _make_vertical(host, MemberKind.KING_STUD, d, bottom_z, top_z,
+                _, top_z_d = _stud_z_range(host, plate_bottom, plate_top, d)
+                m = _make_vertical(host, MemberKind.KING_STUD, d, bottom_z, top_z_d,
                                    stud_family, stud_type, True, STUD_THICKNESS, stud_depth)
                 if m:
                     members.append(m)
@@ -755,7 +766,8 @@ class DoorAssembly(object):
         # King studs.
         for d in (king_left, king_right):
             if 0.0 <= d <= host.length:
-                m = _make_vertical(host, MemberKind.KING_STUD, d, bottom_z, top_z,
+                _, top_z_d = _stud_z_range(host, plate_bottom, plate_top, d)
+                m = _make_vertical(host, MemberKind.KING_STUD, d, bottom_z, top_z_d,
                                    stud_family, stud_type, True, STUD_THICKNESS, stud_depth)
                 if m:
                     members.append(m)
@@ -849,9 +861,26 @@ def _cripples(engine, host, node, left, right, bottom_abs_z, top_abs_z,
 
     for d in stations:
         if not _near(d, occupied, STUD_THICKNESS):
+            # Calculate dynamic bottom/top at this d for sloped top gables
+            curr_bottom = bottom_abs_z
+            curr_top = top_abs_z
+            
+            try:
+                from wf_wall_framing_v4 import _vertical_bounds
+                bounds = _vertical_bounds(host.outer_loop, d)
+                if bounds is not None:
+                    # If top_abs_z represents the top of the wall (above header),
+                    # we adjust it to follow the wall's actual slope top at d.
+                    wall_max_top = max(z for _, z in host.outer_loop)
+                    if top_abs_z >= wall_max_top - inches_to_feet(6.0):
+                        top_offset = wall_max_top - top_abs_z
+                        curr_top = bounds[1] - top_offset
+            except Exception:
+                pass
+
             m = _make_vertical(
                 host, MemberKind.CRIPPLE_STUD, d,
-                bottom_abs_z, top_abs_z,
+                curr_bottom, curr_top,
                 family, type_name, True,
                 STUD_THICKNESS, section_depth,
             )

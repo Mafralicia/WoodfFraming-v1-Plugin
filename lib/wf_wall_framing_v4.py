@@ -227,7 +227,7 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         # ----------------------------------------------------------------
         # Wall-shape members (plates, side studs).
         # ----------------------------------------------------------------
-        members.extend(self._wall_shape_members(host, occupied))
+        members.extend(self._wall_shape_members(host, occupied, node))
 
         # ----------------------------------------------------------------
         # Opening assemblies (replaces the old member-by-member method).
@@ -451,8 +451,72 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
 
     @staticmethod
     def _read_wall_side_face(wall, direction):
-        from Autodesk.Revit.DB import HostObjectUtils, Options, ShellLayerType, Solid
+        from Autodesk.Revit.DB import HostObjectUtils, Options, ShellLayerType, Solid, BuiltInParameter
 
+        # Check if wall is attached at top or bottom
+        is_attached = False
+        try:
+            top_attached = wall.get_Parameter(BuiltInParameter.WALL_TOP_IS_ATTACHED)
+            if top_attached and top_attached.HasValue and top_attached.AsInteger() != 0:
+                is_attached = True
+            bottom_attached = wall.get_Parameter(BuiltInParameter.WALL_BOTTOM_IS_ATTACHED)
+            if bottom_attached and bottom_attached.HasValue and bottom_attached.AsInteger() != 0:
+                is_attached = True
+        except Exception:
+            pass
+
+        # Helper to get side face from actual 3D solid geometry (includes roof/floor cuts and edited profiles)
+        def _get_face_from_solids():
+            try:
+                opts = Options()
+                opts.ComputeReferences = True
+                geom = wall.get_Geometry(opts)
+            except Exception:
+                geom = None
+            if geom is None:
+                return None
+
+            fallback = []
+            for geom_obj in geom:
+                solids = []
+                if isinstance(geom_obj, Solid) and geom_obj.Volume > 0:
+                    solids.append(geom_obj)
+                elif hasattr(geom_obj, "GetInstanceGeometry"):
+                    try:
+                        inst_geom = geom_obj.GetInstanceGeometry()
+                    except Exception:
+                        inst_geom = None
+                    if inst_geom:
+                        for inst_obj in inst_geom:
+                            if isinstance(inst_obj, Solid) and inst_obj.Volume > 0:
+                                solids.append(inst_obj)
+                for solid in solids:
+                    for face in solid.Faces:
+                        normal = _face_normal(face)
+                        if normal is None or abs(normal.Z) > 0.2:
+                            continue
+                        loops = _face_loops_3d(face)
+                        if not loops:
+                            continue
+                        local = _loops_to_local(loops, _first_loop_point(loops), direction)
+                        if not local:
+                            continue
+                        area = abs(_polygon_area(local[0]))
+                        fallback.append((area, face, normal, loops, _face_side_from_normal(wall, normal)))
+
+            if not fallback:
+                return None
+            fallback.sort(key=lambda item: item[0], reverse=True)
+            return fallback[0][1], fallback[0][2], fallback[0][3], fallback[0][4]
+
+        # If the wall is attached to a roof/floor, or if we suspect it's edited,
+        # we always want to try extracting the actual 3D solids first to get the correct cut profile shape.
+        if is_attached:
+            solids_res = _get_face_from_solids()
+            if solids_res is not None:
+                return solids_res
+
+        # Standard fast path using GetSideFaces for simple unattached walls
         for shell_layer, side_name in (
                 (ShellLayerType.Interior, "interior"),
                 (ShellLayerType.Exterior, "exterior")):
@@ -483,47 +547,10 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                 candidates.sort(key=lambda item: item[0], reverse=True)
                 return candidates[0][1], candidates[0][2], candidates[0][3], candidates[0][4]
 
-        try:
-            opts = Options()
-            opts.ComputeReferences = True
-            geom = wall.get_Geometry(opts)
-        except Exception:
-            geom = None
-        if geom is None:
-            return None
-
-        fallback = []
-        for geom_obj in geom:
-            solids = []
-            if isinstance(geom_obj, Solid) and geom_obj.Volume > 0:
-                solids.append(geom_obj)
-            elif hasattr(geom_obj, "GetInstanceGeometry"):
-                try:
-                    inst_geom = geom_obj.GetInstanceGeometry()
-                except Exception:
-                    inst_geom = None
-                if inst_geom:
-                    for inst_obj in inst_geom:
-                        if isinstance(inst_obj, Solid) and inst_obj.Volume > 0:
-                            solids.append(inst_obj)
-            for solid in solids:
-                for face in solid.Faces:
-                    normal = _face_normal(face)
-                    if normal is None or abs(normal.Z) > 0.2:
-                        continue
-                    loops = _face_loops_3d(face)
-                    if not loops:
-                        continue
-                    local = _loops_to_local(loops, _first_loop_point(loops), direction)
-                    if not local:
-                        continue
-                    area = abs(_polygon_area(local[0]))
-                    fallback.append((area, face, normal, loops, _face_side_from_normal(wall, normal)))
-
-        if not fallback:
-            return None
-        fallback.sort(key=lambda item: item[0], reverse=True)
-        return fallback[0][1], fallback[0][2], fallback[0][3], fallback[0][4]
+        # Fallback to solid geometry if it wasn't already tried
+        if not is_attached:
+            return _get_face_from_solids()
+        return None
 
     @staticmethod
     def _orient_as_interior_normal(face_normal, wall, direction):
@@ -752,11 +779,11 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
     # Member calculation
     # ------------------------------------------------------------------
 
-    def _wall_shape_members(self, host, occupied):
+    def _wall_shape_members(self, host, occupied, node=None):
         members = []
         members.extend(self._bottom_plates(host))
         members.extend(self._top_plates(host))
-        members.extend(self._side_studs(host, occupied))
+        members.extend(self._side_studs(host, occupied, node))
         return members
 
     def _bottom_plates(self, host):
@@ -813,7 +840,7 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                 )
         return [member for member in members if member is not None]
 
-    def _side_studs(self, host, occupied):
+    def _side_studs(self, host, occupied, node=None):
         members = []
         side_segments = _segments_by_kind(host, "side")
         host.audit["side_segment_count"] = len(side_segments)
@@ -821,9 +848,17 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         host.audit["side_stud_placed_count"] = 0
         host.audit["side_stud_rejected_count"] = 0
         host.audit["side_stud_attempts"] = []
+        reservations = getattr(node, "reservations", []) if node else []
         for segment in side_segments:
             raw_d = (segment.d0 + segment.d1) * 0.5
             d = _side_stud_position(host, raw_d)
+            
+            # Skip if this end is occupied or reserved by a corner/T assembly
+            if _near(d, occupied, STUD_THICKNESS):
+                continue
+            if is_d_reserved(d, reservations):
+                continue
+
             low_z = min(segment.z0, segment.z1) + self._stud_bottom()
             high_z = max(segment.z0, segment.z1) - self._top_plate_stack()
             attempt = self._record_side_stud_attempt(host, segment, raw_d, d)
