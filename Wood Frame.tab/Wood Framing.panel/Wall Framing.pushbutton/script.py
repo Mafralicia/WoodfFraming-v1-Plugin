@@ -250,7 +250,7 @@ class _WallSupportFilter(ISelectionFilter):
         if category is None:
             return False
         try:
-            return int(category.Id.IntegerValue) == int(DB.BuiltInCategory.OST_StructuralFoundation)
+            return int(_element_id_text(category.Id)) == int(DB.BuiltInCategory.OST_StructuralFoundation)
         except Exception:
             return False
 
@@ -584,7 +584,7 @@ def _create_wall_elevation(doc, wall):
     if not vft:
         return None
         
-    view_name = "Wall Elevation - {}".format(wall.Id.IntegerValue)
+    view_name = "Wall Elevation - {}".format(_element_id_text(wall.Id))
     
     # Check for existing view and delete it
     views = DB.FilteredElementCollector(doc).OfClass(DB.View).WhereElementIsNotElementType()
@@ -595,7 +595,7 @@ def _create_wall_elevation(doc, wall):
             except Exception:
                 # If we cannot delete it, append unique suffix
                 import time
-                view_name = "Wall Elevation - {} - {}".format(wall.Id.IntegerValue, int(time.time() % 1000))
+                view_name = "Wall Elevation - {} - {}".format(_element_id_text(wall.Id), int(time.time() % 1000))
             break
             
     # Create the section view
@@ -793,9 +793,9 @@ def main():
             try:
                 view_section = _create_wall_elevation(doc, wall)
                 if view_section:
-                    created_views.append((wall.Id.IntegerValue, view_section))
+                    created_views.append((_element_id_text(wall.Id), view_section))
             except Exception as e:
-                logger.warning("Failed to create elevation for wall {}: {}".format(wall.Id.IntegerValue, e))
+                logger.warning("Failed to create elevation for wall {}: {}".format(_element_id_text(wall.Id), e))
 
     validation_text = validator.report.summary_text() if 'validator' in dir() else ""
 
