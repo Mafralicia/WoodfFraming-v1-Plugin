@@ -20,6 +20,11 @@ _lib_dir = os.path.join(_ext_dir, "lib")
 if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
+# Force reload wood framing library modules to ensure changes are picked up without restarting Revit
+for m in list(sys.modules.keys()):
+    if m.startswith("wf_"):
+        del sys.modules[m]
+
 from wf_config import (
     FramingConfig,
     SPACING_16OC,
