@@ -11,7 +11,7 @@ verify that the Revit solid model is consistent with the analytical model.
 
 import math
 
-from wf_geometry import inches_to_feet
+from wf_wall_geometry import inches_to_feet
 from wf_wall_topology import MemberKind
 
 

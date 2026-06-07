@@ -17,9 +17,9 @@ New in this version
 
 import math
 
-from wf_config import LAYER_MODE_STRUCTURAL, WALL_BASE_MODE_SUPPORT_TOP
-from wf_families import find_family_symbol
-from wf_geometry import (
+from wf_wall_config import LAYER_MODE_STRUCTURAL, WALL_BASE_MODE_SUPPORT_TOP
+from wf_wall_families import find_family_symbol
+from wf_wall_geometry import (
     FramingMember,
     _get_opening_height,
     _get_opening_width,
@@ -27,13 +27,13 @@ from wf_geometry import (
     inches_to_feet,
     safe_wall_normal,
 )
-from wf_host import (
+from wf_wall_host import (
     _build_compound_layers,
     _get_compound_structure,
     _preferred_wall_target_layer,
     _select_target_layer,
 )
-from wf_placement import BaseFramingEngine
+from wf_wall_placement import BaseFramingEngine
 from wf_wall_topology import (
     MemberKind,
     Reservation,

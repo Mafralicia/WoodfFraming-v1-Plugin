@@ -14,7 +14,7 @@ touch the Revit document; placement is handled by the engine.
 
 import math
 
-from wf_geometry import FramingMember, inches_to_feet
+from wf_wall_geometry import FramingMember, inches_to_feet
 from wf_wall_topology import (
     MemberKind,
     Reservation,

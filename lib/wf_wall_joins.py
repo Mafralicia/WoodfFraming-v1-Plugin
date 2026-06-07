@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Wall-join helpers for corner and partition-backing stud placement."""
 
-from wf_geometry import inches_to_feet
-from wf_host import analyze_wall_host
+from wf_wall_geometry import inches_to_feet
+from wf_wall_host import analyze_wall_host
 
 
 END_JOIN_TOL = inches_to_feet(2.5)

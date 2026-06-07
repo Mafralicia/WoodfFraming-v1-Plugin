@@ -20,8 +20,8 @@ _lib_dir = os.path.join(_ext_dir, "lib")
 if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
-from wf_config import FramingConfig
-from wf_families import (
+from wf_wall_config import FramingConfig
+from wf_wall_families import (
     get_available_types_flat,
     get_column_types_flat,
     parse_family_type_label,

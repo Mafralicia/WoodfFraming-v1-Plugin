@@ -13,8 +13,8 @@ from wf_wall_framing_v4 import (
     _side_stud_position,
     _vertical_bounds,
 )
-from wf_geometry import inches_to_feet
-from wf_tracking import get_tracking_data
+from wf_wall_geometry import inches_to_feet
+from wf_wall_tracking import get_tracking_data
 
 
 JOIN_KIND_CORNER = "corner"

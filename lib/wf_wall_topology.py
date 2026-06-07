@@ -18,7 +18,7 @@ WallTopologyGraph   -- Full connectivity graph for a set of walls.
 import math
 import collections
 
-from wf_geometry import inches_to_feet
+from wf_wall_geometry import inches_to_feet
 
 
 # ---------------------------------------------------------------------------
