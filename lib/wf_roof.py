@@ -2175,3 +2175,339 @@ class RoofFramingEngine(BaseFramingEngine):
         return p_end
 
     def _calc_truss_positions(self, roof_info):
+        """Place trusses at OC spacing based on precise 3D boundary slicing."""
+        from Autodesk.Revit.DB import XYZ
+        import math
+
+        members = []
+        planes = roof_info.planes
+        
+        truss_spacing_in = getattr(self.config, 'truss_spacing', 24.0)
+        ceiling_spacing_in = getattr(self.config, 'ceiling_spacing', 16.0)
+        truss_spacing = truss_spacing_in / 12.0
+        ceiling_spacing = ceiling_spacing_in / 12.0
+        
+        family_top = getattr(self.config, 'family_top_chords', (self.config.stud_family_name, self.config.stud_type_name))
+        family_bottom = getattr(self.config, 'family_bottom_chords', (self.config.stud_family_name, self.config.stud_type_name))
+        family_web = getattr(self.config, 'family_web_bracing', (self.config.stud_family_name, self.config.stud_type_name))
+        family_edge = getattr(self.config, 'family_hips_ridges', (self.config.stud_family_name, self.config.stud_type_name))
+
+        _, tc_depth = self._resolve_roof_member_size(family_top[0], family_top[1])
+        _, bc_depth = self._resolve_roof_member_size(family_bottom[0], family_bottom[1])
+        _, web_depth = self._resolve_roof_member_size(family_web[0], family_web[1])
+
+        walls, beams = self._get_support_elements(roof_info)
+
+        try:
+            ridge_edges = _find_ridge_edges(planes)
+        except Exception:
+            ridge_edges = []
+
+        horizontal_ridges = []
+        for edge in ridge_edges:
+            rs_edge, re_edge, pa_edge, pb_edge = edge
+            if pa_edge.normal.DotProduct(pb_edge.normal) > 0.5:
+                continue
+            if abs(re_edge.Z - rs_edge.Z) < RIDGE_TOL:
+                horizontal_ridges.append(edge)
+
+        if ridge_edges and not horizontal_ridges:
+            horizontal_ridges = ridge_edges
+            
+        sloped = [p for p in planes if p.normal.Z < FLAT_THRESHOLD]
+        
+        slice_planes = []
+
+        seen_t = set()
+        for rs, re, pa, pb in horizontal_ridges:
+            ridge_dir = re - rs
+            ridge_len = ridge_dir.GetLength()
+            if ridge_len < MIN_MEMBER_LENGTH:
+                continue
+            ridge_unit = ridge_dir.Multiply(1.0 / ridge_len)
+            
+            U_x = XYZ(-ridge_unit.Y, ridge_unit.X, 0.0).Normalize()
+            
+            min_d, max_d = 0.0, ridge_len
+            proj_vals = []
+            for plane in planes:
+                if plane.normal.Z >= FLAT_THRESHOLD:
+                    continue
+                for loop in plane.boundary_loops_local:
+                    for vertex in loop:
+                        pt = _surface_point(plane, vertex[0], vertex[1])
+                        proj = (pt - rs).DotProduct(ridge_unit)
+                        proj_vals.append(proj)
+                        
+            if proj_vals:
+                min_d = min(proj_vals)
+                max_d = max(proj_vals)
+                
+            span_len = max_d - min_d
+            num_trusses = int(math.ceil(span_len / truss_spacing)) if truss_spacing > 0 else 1
+            num_trusses = max(1, num_trusses)
+            actual_truss_spacing = span_len / num_trusses
+            
+            for i in range(num_trusses + 1):
+                d_station = min_d + i * actual_truss_spacing
+                ridge_pt = rs + ridge_unit.Multiply(d_station)
+                
+                rounded_station = round(d_station, 2)
+                if rounded_station in seen_t:
+                    continue
+                seen_t.add(rounded_station)
+                
+                slice_planes.append({
+                    "origin": ridge_pt,
+                    "U_x": U_x,
+                    "type": "MAIN"
+                })
+
+        for p in sloped:
+            downslope = XYZ(p.normal.X, p.normal.Y, 0.0).Normalize()
+            is_main = False
+            for rs, re, pa, pb in horizontal_ridges:
+                ridge_dir = (re - rs).Normalize()
+                U_x_main = XYZ(-ridge_dir.Y, ridge_dir.X, 0.0).Normalize()
+                if abs(downslope.DotProduct(U_x_main)) > 0.99:
+                    is_main = True
+                    break
+            
+            if not is_main:
+                cross_slope = XYZ(-downslope.Y, downslope.X, 0.0).Normalize()
+                proj_vals = []
+                for loop in p.boundary_loops_local:
+                    for vertex in loop:
+                        pt = _surface_point(p, vertex[0], vertex[1])
+                        proj_vals.append(pt.DotProduct(cross_slope))
+                        
+                if proj_vals:
+                    min_c = min(proj_vals)
+                    max_c = max(proj_vals)
+                    span_c = max_c - min_c
+                    num_jacks = int(math.ceil(span_c / truss_spacing)) if truss_spacing > 0 else 1
+                    actual_spacing = span_c / num_jacks
+                    
+                    for i in range(1, num_jacks):
+                        c_val = min_c + i * actual_spacing
+                        origin = cross_slope.Multiply(c_val)
+                        slice_planes.append({
+                            "origin": origin,
+                            "U_x": downslope,
+                            "type": "HIP_JACK"
+                        })
+
+        for s_plane in slice_planes:
+            Origin = s_plane["origin"]
+            U_x = s_plane["U_x"]
+            N = U_x.CrossProduct(XYZ.BasisZ).Normalize()
+            
+            segments = []
+            for p in sloped:
+                intersections = []
+                for loop in p.boundary_loops_local:
+                    pts3d = [_surface_point(p, v[0], v[1]) for v in loop]
+                    for i in range(len(pts3d)):
+                        V1 = pts3d[i]
+                        V2 = pts3d[(i+1)%len(pts3d)]
+                        d1 = (V1 - Origin).DotProduct(N)
+                        d2 = (V2 - Origin).DotProduct(N)
+                        
+                        if d1 * d2 < 0:
+                            t = d1 / (d1 - d2)
+                            P_int = V1 + (V2 - V1).Multiply(t)
+                            x_val = (P_int - Origin).DotProduct(U_x)
+                            intersections.append(x_val)
+                        elif abs(d1) < 1e-5:
+                            intersections.append((V1 - Origin).DotProduct(U_x))
+                
+                if len(intersections) >= 2:
+                    x_min = min(intersections)
+                    x_max = max(intersections)
+                    if x_max - x_min < MIN_MEMBER_LENGTH:
+                        continue
+                        
+                    layer_depth = self._resolve_roof_layer_top_depth(p)
+                    p_ref_shifted = _surface_point(p, 0, 0) - p.normal.Multiply(layer_depth + tc_depth / 2.0)
+                    
+                    denom = p.normal.Z
+                    if abs(denom) > 1e-5:
+                        A = - U_x.DotProduct(p.normal) / denom
+                        B = - (Origin - p_ref_shifted).DotProduct(p.normal) / denom
+                        segments.append({
+                            "x_min": x_min,
+                            "x_max": x_max,
+                            "A": A,
+                            "B": B,
+                            "plane": p
+                        })
+            
+            if not segments:
+                continue
+                
+            global_min_x = min(s["x_min"] for s in segments)
+            global_max_x = max(s["x_max"] for s in segments)
+            
+            p_start_3d = Origin + U_x.Multiply(global_min_x)
+            p_end_3d = Origin + U_x.Multiply(global_max_x)
+            
+            intersections = self._find_supports_along_slice(p_start_3d, p_end_3d, walls, beams)
+            joist_z = min([pt.Z for pt in intersections]) if intersections else min(s["A"]*s["x_min"]+s["B"] for s in segments) - 0.5
+            
+            x_events = set()
+            for s in segments:
+                x_events.add(round(s["x_min"], 4))
+                x_events.add(round(s["x_max"], 4))
+            
+            for i in range(len(segments)):
+                for j in range(i+1, len(segments)):
+                    s1 = segments[i]
+                    s2 = segments[j]
+                    if abs(s1["A"] - s2["A"]) > 1e-5:
+                        x_int = (s2["B"] - s1["B"]) / (s1["A"] - s2["A"])
+                        if max(s1["x_min"], s2["x_min"]) - 1e-3 <= x_int <= min(s1["x_max"], s2["x_max"]) + 1e-3:
+                            x_events.add(round(x_int, 4))
+                            
+            x_events = sorted(list(x_events))
+            
+            profile_nodes = []
+            for x_val in x_events:
+                best_z = -1e9
+                best_plane = None
+                for s in segments:
+                    if s["x_min"] - 1e-3 <= x_val <= s["x_max"] + 1e-3:
+                        z_val = s["A"] * x_val + s["B"]
+                        if z_val > best_z:
+                            best_z = z_val
+                            best_plane = s["plane"]
+                if best_z > -1e8:
+                    profile_nodes.append({"x": x_val, "z": best_z, "plane": best_plane})
+                    
+            if len(profile_nodes) < 2:
+                continue
+                
+            filtered_nodes = [profile_nodes[0]]
+            for i in range(1, len(profile_nodes)-1):
+                p_prev = profile_nodes[i-1]
+                p_curr = profile_nodes[i]
+                p_next = profile_nodes[i+1]
+                
+                dx1 = p_curr["x"] - p_prev["x"]
+                dz1 = p_curr["z"] - p_prev["z"]
+                dx2 = p_next["x"] - p_curr["x"]
+                dz2 = p_next["z"] - p_curr["z"]
+                
+                m1 = dz1/dx1 if dx1 != 0 else 1e9
+                m2 = dz2/dx2 if dx2 != 0 else 1e9
+                if abs(m1 - m2) > 1e-4:
+                    filtered_nodes.append(p_curr)
+            filtered_nodes.append(profile_nodes[-1])
+            
+            for i in range(len(filtered_nodes)-1):
+                n1 = filtered_nodes[i]
+                n2 = filtered_nodes[i+1]
+                pt1 = Origin + U_x.Multiply(n1["x"]) + XYZ.BasisZ.Multiply(n1["z"])
+                pt2 = Origin + U_x.Multiply(n2["x"]) + XYZ.BasisZ.Multiply(n2["z"])
+                if (pt2 - pt1).GetLength() < MIN_MEMBER_LENGTH:
+                    continue
+                
+                m_tc = FramingMember(FramingMember.STUD, pt1, pt2)
+                m_tc.member_type = "TOP_CHORD"
+                m_tc.family_name = family_top[0]
+                m_tc.type_name = family_top[1]
+                m_tc.rotation = _rotation_from_up(pt2 - pt1, n1["plane"].normal)
+                m_tc.host_kind = roof_info.kind
+                m_tc.host_id = roof_info.element_id
+                m_tc.disallow_end_joins = True
+                members.append(m_tc)
+                
+            y_bc = joist_z + bc_depth / 2.0
+            
+            heel_x_L = None
+            heel_x_R = None
+            
+            for i in range(len(filtered_nodes)-1):
+                n1 = filtered_nodes[i]
+                n2 = filtered_nodes[i+1]
+                if n1["z"] >= y_bc and n2["z"] >= y_bc:
+                    heel_x_L = n1["x"]
+                    break
+                elif n1["z"] <= y_bc <= n2["z"]:
+                    t = (y_bc - n1["z"]) / (n2["z"] - n1["z"])
+                    heel_x_L = n1["x"] + t * (n2["x"] - n1["x"])
+                    break
+            
+            for i in reversed(range(len(filtered_nodes)-1)):
+                n1 = filtered_nodes[i]
+                n2 = filtered_nodes[i+1]
+                if n1["z"] >= y_bc and n2["z"] >= y_bc:
+                    heel_x_R = n2["x"]
+                    break
+                elif n2["z"] <= y_bc <= n1["z"]:
+                    t = (y_bc - n1["z"]) / (n2["z"] - n1["z"])
+                    heel_x_R = n1["x"] + t * (n2["x"] - n1["x"])
+                    break
+                    
+            if heel_x_L is None or heel_x_R is None or abs(heel_x_R - heel_x_L) < MIN_MEMBER_LENGTH:
+                continue
+                
+            p_bc_start = Origin + U_x.Multiply(heel_x_L) + XYZ.BasisZ.Multiply(y_bc)
+            p_bc_end = Origin + U_x.Multiply(heel_x_R) + XYZ.BasisZ.Multiply(y_bc)
+            
+            m_bc = FramingMember(FramingMember.STUD, p_bc_start, p_bc_end)
+            m_bc.member_type = "BOTTOM_CHORD"
+            m_bc.family_name = family_bottom[0]
+            m_bc.type_name = family_bottom[1]
+            m_bc.rotation = -math.pi / 2.0
+            m_bc.host_kind = roof_info.kind
+            m_bc.host_id = roof_info.element_id
+            m_bc.disallow_end_joins = True
+            members.append(m_bc)
+            
+            web_nodes_top = []
+            for n in filtered_nodes:
+                if heel_x_L + 1e-3 < n["x"] < heel_x_R - 1e-3:
+                    web_nodes_top.append(n)
+            
+            for n in web_nodes_top:
+                pt_top = Origin + U_x.Multiply(n["x"]) + XYZ.BasisZ.Multiply(n["z"])
+                pt_bot = Origin + U_x.Multiply(n["x"]) + XYZ.BasisZ.Multiply(y_bc)
+                if (pt_top - pt_bot).GetLength() < MIN_MEMBER_LENGTH:
+                    continue
+                m_web = FramingMember(FramingMember.STUD, pt_bot, pt_top)
+                m_web.member_type = "WEB_BRACING"
+                m_web.family_name = family_web[0]
+                m_web.type_name = family_web[1]
+                m_web.rotation = _rotation_from_up(pt_top - pt_bot, XYZ.BasisZ)
+                m_web.host_kind = roof_info.kind
+                m_web.host_id = roof_info.element_id
+                m_web.disallow_end_joins = True
+                members.append(m_web)
+                
+            if s_plane["type"] == "HIP_JACK":
+                high_x = heel_x_L if filtered_nodes[0]["z"] > filtered_nodes[-1]["z"] else heel_x_R
+                high_z = None
+                for n in filtered_nodes:
+                    if abs(n["x"] - high_x) < 1e-3:
+                        high_z = n["z"]
+                        break
+                if high_z is not None and high_z > y_bc + 0.5:
+                    pt_top = Origin + U_x.Multiply(high_x) + XYZ.BasisZ.Multiply(high_z)
+                    pt_bot = Origin + U_x.Multiply(high_x) + XYZ.BasisZ.Multiply(y_bc)
+                    if (pt_top - pt_bot).GetLength() >= MIN_MEMBER_LENGTH:
+                        m_web = FramingMember(FramingMember.STUD, pt_bot, pt_top)
+                        m_web.member_type = "WEB_BRACING"
+                        m_web.family_name = family_web[0]
+                        m_web.type_name = family_web[1]
+                        m_web.rotation = _rotation_from_up(pt_top - pt_bot, XYZ.BasisZ)
+                        m_web.host_kind = roof_info.kind
+                        m_web.host_id = roof_info.element_id
+                        m_web.disallow_end_joins = True
+                        members.append(m_web)
+
+        try:
+            members.extend(self._make_ridge_boards(ridge_edges, roof_info))
+        except Exception:
+            pass
+
+        return members
