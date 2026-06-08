@@ -831,7 +831,47 @@ class RoofFramingEngine(BaseFramingEngine):
 
     def place_members(self, members, host_info):
         """Place roof members and apply roof-specific post-processing."""
+        try:
+            from pyrevit import script
+            output = script.get_output()
+            output.print_md("### Debug place_members in wf_roof:")
+            output.print_md("- **Total members to place:** {}".format(len(members)))
+            for m in members:
+                if m.member_type in ("RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER"):
+                    output.print_md("  - **To Place {}**: Start=({:.3f}, {:.3f}, {:.3f}), End=({:.3f}, {:.3f}, {:.3f}), Family={}, Type={}".format(
+                        m.member_type, m.start_point.X, m.start_point.Y, m.start_point.Z,
+                        m.end_point.X, m.end_point.Y, m.end_point.Z, m.family_name, m.type_name
+                    ))
+        except Exception as debug_err:
+            try:
+                from pyrevit import script
+                script.get_output().print_md("> **Debug Error before placement:** {}".format(debug_err))
+            except Exception:
+                pass
+
         placed = BaseFramingEngine.place_members(self, members, host_info)
+
+        try:
+            from pyrevit import script
+            output = script.get_output()
+            output.print_md("- **Total members placed by BaseFramingEngine:** {}".format(len(placed)))
+            
+            # Print the IDs of the placed RIDGE_BOARD / HIP_RAFTER
+            member_pairs = getattr(self, "_last_placed_pairs", None) or []
+            if member_pairs:
+                for member, instance in member_pairs:
+                    mtype = getattr(member, "member_type", "UNKNOWN")
+                    if mtype in ("RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER"):
+                        output.print_md("  - **Placed {} (ID: {})**: Start=({:.3f}, {:.3f}, {:.3f}), End=({:.3f}, {:.3f}, {:.3f})".format(
+                            mtype, instance.Id.Value, member.start_point.X, member.start_point.Y, member.start_point.Z,
+                            member.end_point.X, member.end_point.Y, member.end_point.Z
+                        ))
+        except Exception as debug_err:
+            try:
+                from pyrevit import script
+                script.get_output().print_md("> **Debug Error after placement:** {}".format(debug_err))
+            except Exception:
+                pass
 
         try:
             self._set_coping_distance_zero(placed)
