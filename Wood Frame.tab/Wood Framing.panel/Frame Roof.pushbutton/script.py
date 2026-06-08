@@ -146,6 +146,11 @@ class FrameRoofDialog(WPFWindow):
         truss_types_map = {0: "KingPost", 1: "Fink", 2: "Pratt", 3: "Dynamic"}
         selected_truss_type = truss_types_map.get(truss_idx, "Dynamic")
 
+        try:
+            web_sp = float(self.tb_web_spacing.Text)
+        except ValueError:
+            web_sp = 48.0
+
         tc_sel = self.cb_tc_type.SelectedItem
         bc_sel = self.cb_bc_type.SelectedItem
         web_sel = self.cb_web_type.SelectedItem
@@ -167,6 +172,8 @@ class FrameRoofDialog(WPFWindow):
         cfg.truss_spacing = truss_sp
         cfg.ceiling_spacing = ceil_sp
         cfg.truss_type = selected_truss_type
+        cfg.web_spacing = web_sp
+        cfg.include_roof_kickers = self.chk_include_kickers.IsChecked
         cfg.family_top_chords = family_tc
         cfg.family_bottom_chords = family_bc
         cfg.family_web_bracing = family_web
@@ -188,6 +195,8 @@ class FrameRoofDialog(WPFWindow):
             data = cfg.to_dict()
             data["_mode"] = style
             data["_truss_type_idx"] = self.cb_truss_type.SelectedIndex
+            data["_web_spacing"] = self.tb_web_spacing.Text
+            data["_include_kickers"] = self.chk_include_kickers.IsChecked
             data["_tc_label"] = str(self.cb_tc_type.SelectedItem or "")
             data["_bc_label"] = str(self.cb_bc_type.SelectedItem or "")
             data["_web_label"] = str(self.cb_web_type.SelectedItem or "")
@@ -221,6 +230,8 @@ class FrameRoofDialog(WPFWindow):
 
             truss_type_idx = data.get("_truss_type_idx", 3)
             self.cb_truss_type.SelectedIndex = truss_type_idx
+            self.tb_web_spacing.Text = data.get("_web_spacing", "48")
+            self.chk_include_kickers.IsChecked = data.get("_include_kickers", False)
 
             tc_label = data.get("_tc_label", "")
             if tc_label and tc_label in self._framing_labels:

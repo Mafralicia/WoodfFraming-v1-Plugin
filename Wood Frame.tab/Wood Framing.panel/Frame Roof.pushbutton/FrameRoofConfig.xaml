@@ -41,18 +41,21 @@
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="120"/>
+                            <ColumnDefinition Width="150"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock Text="Truss Topology:" VerticalAlignment="Center" FontWeight="Normal"/>
-                        <ComboBox x:Name="cb_truss_type" Grid.Column="1" Height="24" SelectedIndex="3">
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Truss Topology:" VerticalAlignment="Center" Margin="0,4,8,4" FontWeight="Normal"/>
+                        <ComboBox x:Name="cb_truss_type" Grid.Row="0" Grid.Column="1" Height="24" SelectedIndex="3" Margin="0,4,0,4">
                             <ComboBoxItem Content="King Post"/>
                             <ComboBoxItem Content="Fink"/>
                             <ComboBoxItem Content="Pratt"/>
                             <ComboBoxItem Content="Dynamic (Auto)"/>
                         </ComboBox>
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Web Spacing (inches):" VerticalAlignment="Center" Margin="0,4,8,4" FontWeight="Normal"/>
+                        <TextBox x:Name="tb_web_spacing" Grid.Row="1" Grid.Column="1" Height="24" Margin="0,4,0,4" Text="48" VerticalContentAlignment="Center" Padding="4,0,0,0"/>
                     </Grid>
                 </GroupBox>
 
@@ -79,6 +82,7 @@
                                 <TextBox x:Name="tb_ceil_custom" Width="50" Margin="4,0,0,0" Text="16" IsEnabled="False" Height="20" VerticalContentAlignment="Center"/>
                                 <TextBlock Text=' "' VerticalAlignment="Center" Margin="2,0,0,0"/>
                             </StackPanel>
+                            <CheckBox x:Name="chk_include_kickers" Content="Include Diagonal Kickers" IsChecked="False" Margin="0,4,0,8" FontWeight="Normal"/>
                         </StackPanel>
                     </StackPanel>
                 </GroupBox>

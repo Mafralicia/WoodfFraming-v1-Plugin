@@ -2356,8 +2356,15 @@ class RoofFramingEngine(BaseFramingEngine):
             p_start_3d = Origin + U_x.Multiply(global_min_x)
             p_end_3d = Origin + U_x.Multiply(global_max_x)
             
+            # Find the lowest Z height along all top chord segments
+            lowest_roof_z = 1e9
+            for s in segments:
+                lowest_roof_z = min(lowest_roof_z, s["A"] * s["x_min"] + s["B"])
+                lowest_roof_z = min(lowest_roof_z, s["A"] * s["x_max"] + s["B"])
+            
             intersections = self._find_supports_along_slice(p_start_3d, p_end_3d, walls, beams)
-            joist_z = min([pt.Z for pt in intersections]) if intersections else min(s["A"]*s["x_min"]+s["B"] for s in segments) - 0.5
+            valid_zs = [pt.Z for pt in intersections if pt.Z < lowest_roof_z - 0.1]
+            joist_z = min(valid_zs) if valid_zs else lowest_roof_z - 1.0
             
             x_events = set()
             for s in segments:
@@ -2428,32 +2435,28 @@ class RoofFramingEngine(BaseFramingEngine):
                 
             y_bc = joist_z + bc_depth / 2.0
             
-            heel_x_L = None
-            heel_x_R = None
-            
-            for i in range(len(filtered_nodes)-1):
+            # Find the interval where the top chord profile is above y_bc
+            candidate_xs = []
+            for n in filtered_nodes:
+                if n["z"] >= y_bc - 1e-5:
+                    candidate_xs.append(n["x"])
+            for i in range(len(filtered_nodes) - 1):
                 n1 = filtered_nodes[i]
                 n2 = filtered_nodes[i+1]
-                if n1["z"] >= y_bc and n2["z"] >= y_bc:
-                    heel_x_L = n1["x"]
-                    break
-                elif n1["z"] <= y_bc <= n2["z"]:
+                z_min = min(n1["z"], n2["z"])
+                z_max = max(n1["z"], n2["z"])
+                if z_min <= y_bc <= z_max and abs(n2["z"] - n1["z"]) > 1e-5:
                     t = (y_bc - n1["z"]) / (n2["z"] - n1["z"])
-                    heel_x_L = n1["x"] + t * (n2["x"] - n1["x"])
-                    break
-            
-            for i in reversed(range(len(filtered_nodes)-1)):
-                n1 = filtered_nodes[i]
-                n2 = filtered_nodes[i+1]
-                if n1["z"] >= y_bc and n2["z"] >= y_bc:
-                    heel_x_R = n2["x"]
-                    break
-                elif n2["z"] <= y_bc <= n1["z"]:
-                    t = (y_bc - n1["z"]) / (n2["z"] - n1["z"])
-                    heel_x_R = n1["x"] + t * (n2["x"] - n1["x"])
-                    break
+                    x_int = n1["x"] + t * (n2["x"] - n1["x"])
+                    candidate_xs.append(x_int)
                     
-            if heel_x_L is None or heel_x_R is None or abs(heel_x_R - heel_x_L) < MIN_MEMBER_LENGTH:
+            if not candidate_xs:
+                continue
+                
+            heel_x_L = min(candidate_xs)
+            heel_x_R = max(candidate_xs)
+            
+            if abs(heel_x_R - heel_x_L) < MIN_MEMBER_LENGTH:
                 continue
                 
             p_bc_start = Origin + U_x.Multiply(heel_x_L) + XYZ.BasisZ.Multiply(y_bc)
@@ -2519,9 +2522,6 @@ class RoofFramingEngine(BaseFramingEngine):
 
         try:
             members.extend(self._make_ridge_boards(ridge_edges, roof_info))
-            members.extend(self._make_collar_ties(planes, ridge_edges, roof_info))
-            ceiling_spacing = getattr(self.config, 'ceiling_spacing', getattr(self.config, 'truss_spacing', 24.0))
-            members.extend(self._make_ceiling_joists(planes, ridge_edges, roof_info, ceiling_spacing))
         except Exception:
             pass
 
