@@ -65,68 +65,139 @@ class FrameRoofDialog(WPFWindow):
         self.result = None
 
         self._framing_labels = get_available_types_flat(doc)
-        self.cb_rafter_type.ItemsSource = self._framing_labels
+        self.cb_tc_type.ItemsSource = self._framing_labels
+        self.cb_bc_type.ItemsSource = self._framing_labels
+        self.cb_web_type.ItemsSource = self._framing_labels
         self.cb_ridge_type.ItemsSource = self._framing_labels
 
         if self._framing_labels:
-            self.cb_rafter_type.SelectedIndex = 0
+            self.cb_tc_type.SelectedIndex = 0
+            self.cb_bc_type.SelectedIndex = min(1, len(self._framing_labels)-1) if len(self._framing_labels) > 1 else 0
+            self.cb_web_type.SelectedIndex = min(2, len(self._framing_labels)-1) if len(self._framing_labels) > 2 else 0
             self.cb_ridge_type.SelectedIndex = 0
 
-        self.rb_custom_sp.Checked += self._on_custom_checked
-        self.rb_custom_sp.Unchecked += self._on_custom_unchecked
+        # Style changed events
+        self.rb_style_truss.Checked += self._on_style_changed
+        self.rb_style_stick.Checked += self._on_style_changed
+
+        # Custom spacing events
+        self.rb_truss_custom.Checked += self._on_truss_custom_checked
+        self.rb_truss_custom.Unchecked += self._on_truss_custom_unchecked
+
+        self.rb_ceil_custom.Checked += self._on_ceil_custom_checked
+        self.rb_ceil_custom.Unchecked += self._on_ceil_custom_unchecked
+
         self.btn_ok.Click += self._on_ok
         self.btn_cancel.Click += self._on_cancel
 
         self._restore_last()
+        self._on_style_changed(None, None)
 
-    def _on_custom_checked(self, sender, args):
-        self.tb_custom_spacing.IsEnabled = True
+    def _on_style_changed(self, sender, args):
+        is_truss = self.rb_style_truss.IsChecked
+        if hasattr(self, "gb_truss_options") and self.gb_truss_options:
+            self.gb_truss_options.IsEnabled = is_truss
+        if hasattr(self, "sp_ceiling_spacing") and self.sp_ceiling_spacing:
+            self.sp_ceiling_spacing.IsEnabled = is_truss
+        if hasattr(self, "cb_bc_type") and self.cb_bc_type:
+            self.cb_bc_type.IsEnabled = is_truss
+        if hasattr(self, "cb_web_type") and self.cb_web_type:
+            self.cb_web_type.IsEnabled = is_truss
 
-    def _on_custom_unchecked(self, sender, args):
-        self.tb_custom_spacing.IsEnabled = False
+    def _on_truss_custom_checked(self, sender, args):
+        self.tb_truss_custom.IsEnabled = True
+
+    def _on_truss_custom_unchecked(self, sender, args):
+        self.tb_truss_custom.IsEnabled = False
+
+    def _on_ceil_custom_checked(self, sender, args):
+        self.tb_ceil_custom.IsEnabled = True
+
+    def _on_ceil_custom_unchecked(self, sender, args):
+        self.tb_ceil_custom.IsEnabled = False
 
     def _on_ok(self, sender, args):
-        cfg = FramingConfig()
+        style = "truss" if self.rb_style_truss.IsChecked else "stick"
 
-        rafter_sel = self.cb_rafter_type.SelectedItem
-        if rafter_sel:
-            family_name, type_name = parse_family_type_label(str(rafter_sel))
-            cfg.stud_family_name = family_name
-            cfg.stud_type_name = type_name
-
-        ridge_sel = self.cb_ridge_type.SelectedItem
-        if ridge_sel:
-            family_name, type_name = parse_family_type_label(str(ridge_sel))
-            cfg.header_family_name = family_name
-            cfg.header_type_name = type_name
-
-        if self.rb_16oc.IsChecked:
-            cfg.stud_spacing = SPACING_16OC
-        elif self.rb_24oc.IsChecked:
-            cfg.stud_spacing = SPACING_24OC
+        # Truss spacing
+        if self.rb_truss_16oc.IsChecked:
+            truss_sp = 16.0
+        elif self.rb_truss_24oc.IsChecked:
+            truss_sp = 24.0
         else:
             try:
-                cfg.stud_spacing = float(self.tb_custom_spacing.Text)
-            except Exception:
-                cfg.stud_spacing = SPACING_16OC
+                truss_sp = float(self.tb_truss_custom.Text)
+            except ValueError:
+                truss_sp = 24.0
 
-        cfg.include_collar_ties = False
-        cfg.include_ceiling_joists = False
-        cfg.include_roof_kickers = False
+        # Ceiling spacing
+        if self.rb_ceil_16oc.IsChecked:
+            ceil_sp = 16.0
+        elif self.rb_ceil_24oc.IsChecked:
+            ceil_sp = 24.0
+        else:
+            try:
+                ceil_sp = float(self.tb_ceil_custom.Text)
+            except ValueError:
+                ceil_sp = 16.0
 
-        self.result = {"config": cfg}
-        self._save_last(cfg)
+        # Truss topology
+        truss_idx = self.cb_truss_type.SelectedIndex
+        truss_types_map = {0: "KingPost", 1: "Fink", 2: "Pratt", 3: "Dynamic"}
+        selected_truss_type = truss_types_map.get(truss_idx, "Dynamic")
+
+        tc_sel = self.cb_tc_type.SelectedItem
+        bc_sel = self.cb_bc_type.SelectedItem
+        web_sel = self.cb_web_type.SelectedItem
+        ridge_sel = self.cb_ridge_type.SelectedItem
+
+        family_tc = parse_family_type_label(str(tc_sel)) if tc_sel else ("", "")
+        family_bc = parse_family_type_label(str(bc_sel)) if bc_sel else ("", "")
+        family_web = parse_family_type_label(str(web_sel)) if web_sel else ("", "")
+        family_ridge = parse_family_type_label(str(ridge_sel)) if ridge_sel else ("", "")
+
+        cfg = FramingConfig()
+        cfg.stud_spacing = truss_sp
+        cfg.stud_family_name = family_tc[0]
+        cfg.stud_type_name = family_tc[1]
+        cfg.header_family_name = family_ridge[0]
+        cfg.header_type_name = family_ridge[1]
+
+        # Inject additional parameters used by the engine
+        cfg.truss_spacing = truss_sp
+        cfg.ceiling_spacing = ceil_sp
+        cfg.truss_type = selected_truss_type
+        cfg.family_top_chords = family_tc
+        cfg.family_bottom_chords = family_bc
+        cfg.family_web_bracing = family_web
+        cfg.family_hips_ridges = family_ridge
+
+        self.result = {
+            "config": cfg,
+            "mode": style
+        }
+        self._save_last(cfg, style)
         self.Close()
 
     def _on_cancel(self, sender, args):
         self.result = None
         self.Close()
 
-    def _save_last(self, cfg):
+    def _save_last(self, cfg, style):
         try:
             data = cfg.to_dict()
-            data["_rafter_label"] = str(self.cb_rafter_type.SelectedItem or "")
+            data["_mode"] = style
+            data["_truss_type_idx"] = self.cb_truss_type.SelectedIndex
+            data["_tc_label"] = str(self.cb_tc_type.SelectedItem or "")
+            data["_bc_label"] = str(self.cb_bc_type.SelectedItem or "")
+            data["_web_label"] = str(self.cb_web_type.SelectedItem or "")
             data["_ridge_label"] = str(self.cb_ridge_type.SelectedItem or "")
+            
+            data["_truss_sp_state"] = "16" if self.rb_truss_16oc.IsChecked else ("24" if self.rb_truss_24oc.IsChecked else "custom")
+            data["_truss_custom_text"] = self.tb_truss_custom.Text
+            data["_ceil_sp_state"] = "16" if self.rb_ceil_16oc.IsChecked else ("24" if self.rb_ceil_24oc.IsChecked else "custom")
+            data["_ceil_custom_text"] = self.tb_ceil_custom.Text
+
             directory = os.path.dirname(_CFG_PATH)
             if not os.path.exists(directory):
                 os.makedirs(directory)
@@ -142,22 +213,45 @@ class FrameRoofDialog(WPFWindow):
             with open(_CFG_PATH, "r") as stream:
                 data = json.load(stream)
 
-            rafter_label = data.get("_rafter_label", "")
-            if rafter_label and rafter_label in self._framing_labels:
-                self.cb_rafter_type.SelectedItem = rafter_label
+            mode = data.get("_mode", "truss")
+            if mode == "truss":
+                self.rb_style_truss.IsChecked = True
+            else:
+                self.rb_style_stick.IsChecked = True
 
+            truss_type_idx = data.get("_truss_type_idx", 3)
+            self.cb_truss_type.SelectedIndex = truss_type_idx
+
+            tc_label = data.get("_tc_label", "")
+            if tc_label and tc_label in self._framing_labels:
+                self.cb_tc_type.SelectedItem = tc_label
+            bc_label = data.get("_bc_label", "")
+            if bc_label and bc_label in self._framing_labels:
+                self.cb_bc_type.SelectedItem = bc_label
+            web_label = data.get("_web_label", "")
+            if web_label and web_label in self._framing_labels:
+                self.cb_web_type.SelectedItem = web_label
             ridge_label = data.get("_ridge_label", "")
             if ridge_label and ridge_label in self._framing_labels:
                 self.cb_ridge_type.SelectedItem = ridge_label
 
-            spacing = data.get("stud_spacing", SPACING_16OC)
-            if spacing == SPACING_16OC:
-                self.rb_16oc.IsChecked = True
-            elif spacing == SPACING_24OC:
-                self.rb_24oc.IsChecked = True
+            truss_sp_state = data.get("_truss_sp_state", "24")
+            if truss_sp_state == "16":
+                self.rb_truss_16oc.IsChecked = True
+            elif truss_sp_state == "24":
+                self.rb_truss_24oc.IsChecked = True
             else:
-                self.rb_custom_sp.IsChecked = True
-                self.tb_custom_spacing.Text = str(spacing)
+                self.rb_truss_custom.IsChecked = True
+                self.tb_truss_custom.Text = data.get("_truss_custom_text", "24")
+
+            ceil_sp_state = data.get("_ceil_sp_state", "16")
+            if ceil_sp_state == "16":
+                self.rb_ceil_16oc.IsChecked = True
+            elif ceil_sp_state == "24":
+                self.rb_ceil_24oc.IsChecked = True
+            else:
+                self.rb_ceil_custom.IsChecked = True
+                self.tb_ceil_custom.Text = data.get("_ceil_custom_text", "16")
         except Exception:
             pass
 
@@ -182,7 +276,7 @@ def main():
             refs = revit.uidoc.Selection.PickObjects(
                 ObjectType.Element,
                 _RoofFilter(),
-                "Select single-slope roofs to frame",
+                "Select roofs to frame",
             )
             roofs = [doc.GetElement(ref.ElementId) for ref in refs]
         except Exception:
@@ -198,14 +292,7 @@ def main():
         return
 
     config = dialog.result["config"]
-    # Inject parametric variables from the top of the script
-    config.truss_spacing = truss_spacing
-    config.ceiling_spacing = ceiling_spacing
-    config.truss_type = truss_type
-    config.family_top_chords = FAMILY_TOP_CHORDS
-    config.family_bottom_chords = FAMILY_BOTTOM_CHORDS
-    config.family_web_bracing = FAMILY_WEB_BRACING
-    config.family_hips_ridges = FAMILY_HIPS_RIDGES
+    mode = dialog.result["mode"]
 
     engine = RoofFramingEngine(doc, config)
 
@@ -224,7 +311,7 @@ def main():
         )
         for roof in roofs:
             try:
-                members, roof_info = engine.calculate_members(roof, mode="truss")
+                members, roof_info = engine.calculate_members(roof, mode=mode)
             except Exception as calc_err:
                 errors.append(
                     "Roof {0} calc error: {1}".format(roof.Id.Value, calc_err)

@@ -2007,7 +2007,6 @@ class RoofFramingEngine(BaseFramingEngine):
         # 1. Generate Truss Elements
         for t_data in truss_lines:
             if len(t_data) == 5:
-                # Gable/Hip Truss
                 foot_a, foot_b, pa, pb, ridge_pt = t_data
                 joist_z = min(foot_a.Z, foot_b.Z)
                 
@@ -2017,11 +2016,14 @@ class RoofFramingEngine(BaseFramingEngine):
                 
                 layer_depth_a = self._resolve_roof_layer_top_depth(pa)
                 layer_depth_b = self._resolve_roof_layer_top_depth(pb)
-                
-                p_eave_a_shifted = p_eave_a - pa.normal.Multiply(layer_depth_a)
-                p_eave_b_shifted = p_eave_b - pb.normal.Multiply(layer_depth_b)
                 layer_depth_avg = (layer_depth_a + layer_depth_b) * 0.5
-                ridge_shifted = ridge_pt - pa.normal.Multiply(layer_depth_avg)
+                
+                # Calibrated 3D sloped offsets along roof normals
+                p_tc_start_3d_L = foot_a - pa.normal.Multiply(layer_depth_a + tc_depth / 2.0)
+                p_tc_end_3d_L = ridge_pt - pa.normal.Multiply(layer_depth_avg + tc_depth / 2.0)
+                
+                p_tc_start_3d_R = foot_b - pb.normal.Multiply(layer_depth_b + tc_depth / 2.0)
+                p_tc_end_3d_R = ridge_pt - pb.normal.Multiply(layer_depth_avg + tc_depth / 2.0)
                 
                 intersections = self._find_supports_along_slice(p_eave_a, p_eave_b, walls, beams)
                 if len(intersections) >= 2:
@@ -2038,41 +2040,43 @@ class RoofFramingEngine(BaseFramingEngine):
                 if L < MIN_MEMBER_LENGTH:
                     continue
                 
-                x_eave_a = (p_eave_a_shifted - support_a).DotProduct(U_x)
-                y_eave_a = p_eave_a_shifted.Z - joist_z
+                # Project directly to 2D local space to preserve un-approximated slope
+                x_tc_start_L = (p_tc_start_3d_L - support_a).DotProduct(U_x)
+                y_tc_start_L = p_tc_start_3d_L.Z - joist_z
                 
-                x_eave_b = (p_eave_b_shifted - support_a).DotProduct(U_x)
-                y_eave_b = p_eave_b_shifted.Z - joist_z
+                x_tc_end_L = (p_tc_end_3d_L - support_a).DotProduct(U_x)
+                y_tc_end_L = p_tc_end_3d_L.Z - joist_z
                 
-                x_ridge = (ridge_shifted - support_a).DotProduct(U_x)
-                y_ridge = ridge_shifted.Z - joist_z
+                x_tc_start_R = (p_tc_start_3d_R - support_a).DotProduct(U_x)
+                y_tc_start_R = p_tc_start_3d_R.Z - joist_z
                 
-                m_L = (y_ridge - y_eave_a) / (x_ridge - x_eave_a) if abs(x_ridge - x_eave_a) > 1e-5 else 0.0
-                m_R = (y_ridge - y_eave_b) / (x_ridge - x_eave_b) if abs(x_ridge - x_eave_b) > 1e-5 else 0.0
-                theta_L = math.atan(m_L)
-                theta_R = math.atan(m_R)
+                x_tc_end_R = (p_tc_end_3d_R - support_a).DotProduct(U_x)
+                y_tc_end_R = p_tc_end_3d_R.Z - joist_z
                 
-                y_bc = bc_depth / 2.0
+                m_L = (y_tc_end_L - y_tc_start_L) / (x_tc_end_L - x_tc_start_L) if abs(x_tc_end_L - x_tc_start_L) > 1e-5 else 0.0
+                C_L = y_tc_start_L - m_L * x_tc_start_L
                 
-                C_L = y_ridge - m_L * x_ridge - (tc_depth / (2.0 * math.cos(theta_L)))
-                C_R = y_ridge - m_R * x_ridge - (tc_depth / (2.0 * math.cos(theta_R)))
+                m_R = (y_tc_end_R - y_tc_start_R) / (x_tc_end_R - x_tc_start_R) if abs(x_tc_end_R - x_tc_start_R) > 1e-5 else 0.0
+                C_R = y_tc_start_R - m_R * x_tc_start_R
                 
                 if abs(m_L - m_R) > 1e-5:
                     x_ridge_node = (C_R - C_L) / (m_L - m_R)
                     y_ridge_node = m_L * x_ridge_node + C_L
                 else:
-                    x_ridge_node = x_ridge
-                    y_ridge_node = y_ridge - (tc_depth / 2.0)
+                    x_ridge_node = (x_tc_end_L + x_tc_end_R) * 0.5
+                    y_ridge_node = (y_tc_end_L + y_tc_end_R) * 0.5
                 n_ridge = (x_ridge_node, y_ridge_node)
                 
-                x_heel_L = (y_bc - C_L) / m_L if abs(m_L) > 1e-5 else x_eave_a
+                y_bc = bc_depth / 2.0
+                
+                x_heel_L = (y_bc - C_L) / m_L if abs(m_L) > 1e-5 else x_tc_start_L
                 n_heel_L = (x_heel_L, y_bc)
                 
-                x_heel_R = (y_bc - C_R) / m_R if abs(m_R) > 1e-5 else x_eave_b
+                x_heel_R = (y_bc - C_R) / m_R if abs(m_R) > 1e-5 else x_tc_start_R
                 n_heel_R = (x_heel_R, y_bc)
                 
-                n_eave_L = (x_eave_a, m_L * x_eave_a + C_L)
-                n_eave_R = (x_eave_b, m_R * x_eave_b + C_R)
+                n_eave_L = (x_tc_start_L, y_tc_start_L)
+                n_eave_R = (x_tc_start_R, y_tc_start_R)
                 
                 nodes = {}
                 webs = []
@@ -2086,7 +2090,7 @@ class RoofFramingEngine(BaseFramingEngine):
                         topology = "Fink"
                     else:
                         topology = "Pratt"
-
+ 
                 if topology == "KingPost":
                     # KingPost Topology
                     nodes["heel_L"] = n_heel_L
@@ -2209,8 +2213,10 @@ class RoofFramingEngine(BaseFramingEngine):
                 U_x = (p_eave_high - p_eave_low).Normalize()
                 
                 layer_depth = self._resolve_roof_layer_top_depth(plane)
-                p_eave_low_shifted = p_eave_low - plane.normal.Multiply(layer_depth)
-                p_eave_high_shifted = p_eave_high - plane.normal.Multiply(layer_depth)
+                
+                # Calibrated 3D sloped offsets along roof normal
+                p_tc_start_3d = s_pt - plane.normal.Multiply(layer_depth + tc_depth / 2.0)
+                p_tc_end_3d = e_pt - plane.normal.Multiply(layer_depth + tc_depth / 2.0)
                 
                 intersections = self._find_supports_along_slice(p_eave_low, p_eave_high, walls, beams)
                 if len(intersections) >= 2:
@@ -2227,27 +2233,27 @@ class RoofFramingEngine(BaseFramingEngine):
                 if L < MIN_MEMBER_LENGTH:
                     continue
                 
-                x_eave_low = (p_eave_low_shifted - support_low).DotProduct(U_x)
-                y_eave_low = p_eave_low_shifted.Z - joist_z
+                x_tc_start = (p_tc_start_3d - support_low).DotProduct(U_x)
+                y_tc_start = p_tc_start_3d.Z - joist_z
                 
-                x_eave_high = (p_eave_high_shifted - support_low).DotProduct(U_x)
-                y_eave_high = p_eave_high_shifted.Z - joist_z
+                x_tc_end = (p_tc_end_3d - support_low).DotProduct(U_x)
+                y_tc_end = p_tc_end_3d.Z - joist_z
                 
-                m = (y_eave_high - y_eave_low) / (x_eave_high - x_eave_low) if abs(x_eave_high - x_eave_low) > 1e-5 else 0.0
+                m = (y_tc_end - y_tc_start) / (x_tc_end - x_tc_start) if abs(x_tc_end - x_tc_start) > 1e-5 else 0.0
                 theta = math.atan(m)
                 
                 y_bc = bc_depth / 2.0
-                C = y_eave_low - m * x_eave_low - (tc_depth / (2.0 * math.cos(theta)))
+                C = y_tc_start - m * x_tc_start
                 
-                x_heel_L = (y_bc - C) / m if abs(m) > 1e-5 else x_eave_low
+                x_heel_L = (y_bc - C) / m if abs(m) > 1e-5 else x_tc_start
                 n_heel_L = (x_heel_L, y_bc)
                 
                 n_heel_R = (L, y_bc)
                 y_top_high = m * L + C
                 n_top_R = (L, y_top_high)
                 
-                n_eave_low = (x_eave_low, m * x_eave_low + C)
-                n_eave_high = (x_eave_high, m * x_eave_high + C)
+                n_eave_low = (x_tc_start, y_tc_start)
+                n_eave_high = (x_tc_end, y_tc_end)
                 
                 span_node = L - x_heel_L
                 if span_node < 12.0:
