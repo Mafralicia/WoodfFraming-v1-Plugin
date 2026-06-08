@@ -80,7 +80,26 @@ class BaseFramingEngine(object):
                     instance = None
 
             if instance is None:
+                try:
+                    mtype = getattr(member, "member_type", "UNKNOWN")
+                    if mtype in ("RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER"):
+                        from pyrevit import script
+                        script.get_output().print_md("> **Failed to place {}**: Start=({:.3f}, {:.3f}, {:.3f}), End=({:.3f}, {:.3f}, {:.3f}), Family={}, Type={}".format(
+                            mtype, start.X, start.Y, start.Z, end.X, end.Y, end.Z, member.family_name, member.type_name
+                        ))
+                except Exception:
+                    pass
                 continue
+
+            try:
+                mtype = getattr(member, "member_type", "UNKNOWN")
+                if mtype in ("RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER"):
+                    from pyrevit import script
+                    script.get_output().print_md("> **Placed {} (ID: {})**: Start=({:.3f}, {:.3f}, {:.3f}), End=({:.3f}, {:.3f}, {:.3f}), Family={}, Type={}".format(
+                        mtype, instance.Id.Value, start.X, start.Y, start.Z, end.X, end.Y, end.Z, member.family_name, member.type_name
+                    ))
+            except Exception:
+                pass
 
             # Center cross-section and apply the requested rotation.
             self._center_on_curve(instance)

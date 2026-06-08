@@ -797,6 +797,17 @@ class RoofTopologyGraph(object):
                     output.print_md("> **Warning:** Shared edge between faces {} classified as '{}' (expected RIDGE/HIP/VALLEY)".format(
                         [f.index for f in edge.faces], edge.edge_type
                     ))
+
+            # Print details of the ridge and hip/valley edges
+            output.print_md("#### Classified Ridge & Hip Edges Details:")
+            for edge in self.edges.values():
+                if edge.edge_type in ("RIDGE", "HIP", "VALLEY"):
+                    length = (edge.node_b.pt - edge.node_a.pt).GetLength()
+                    output.print_md("  - **{}**: length={:.3f} ft, Node A=({:.3f}, {:.3f}, {:.3f}), Node B=({:.3f}, {:.3f}, {:.3f})".format(
+                        edge.edge_type, length,
+                        edge.node_a.pt.X, edge.node_a.pt.Y, edge.node_a.pt.Z,
+                        edge.node_b.pt.X, edge.node_b.pt.Y, edge.node_b.pt.Z
+                    ))
         except Exception:
             pass
 
