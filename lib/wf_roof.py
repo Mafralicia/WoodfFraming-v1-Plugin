@@ -2519,6 +2519,9 @@ class RoofFramingEngine(BaseFramingEngine):
 
         try:
             members.extend(self._make_ridge_boards(ridge_edges, roof_info))
+            members.extend(self._make_collar_ties(planes, ridge_edges, roof_info))
+            ceiling_spacing = getattr(self.config, 'ceiling_spacing', getattr(self.config, 'truss_spacing', 24.0))
+            members.extend(self._make_ceiling_joists(planes, ridge_edges, roof_info, ceiling_spacing))
         except Exception:
             pass
 
