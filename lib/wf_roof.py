@@ -2260,7 +2260,8 @@ class RoofFramingEngine(BaseFramingEngine):
                 slice_planes.append({
                     "origin": ridge_pt,
                     "U_x": U_x,
-                    "type": "MAIN"
+                    "type": "MAIN",
+                    "plane": None
                 })
 
         for p in sloped:
@@ -2294,7 +2295,8 @@ class RoofFramingEngine(BaseFramingEngine):
                         slice_planes.append({
                             "origin": origin,
                             "U_x": downslope,
-                            "type": "HIP_JACK"
+                            "type": "HIP_JACK",
+                            "plane": p
                         })
 
         for s_plane in slice_planes:
@@ -2304,6 +2306,9 @@ class RoofFramingEngine(BaseFramingEngine):
             
             segments = []
             for p in sloped:
+                if s_plane["type"] == "HIP_JACK" and p != s_plane["plane"]:
+                    continue
+                
                 intersections = []
                 for loop in p.boundary_loops_local:
                     pts3d = [_surface_point(p, v[0], v[1]) for v in loop]
@@ -2464,46 +2469,53 @@ class RoofFramingEngine(BaseFramingEngine):
             m_bc.disallow_end_joins = True
             members.append(m_bc)
             
-            web_nodes_top = []
-            for n in filtered_nodes:
-                if heel_x_L + 1e-3 < n["x"] < heel_x_R - 1e-3:
-                    web_nodes_top.append(n)
+            # Calculate highest node for the king post
+            highest_node = max(filtered_nodes, key=lambda n: n["z"])
+            king_x = highest_node["x"]
             
-            for n in web_nodes_top:
-                pt_top = Origin + U_x.Multiply(n["x"]) + XYZ.BasisZ.Multiply(n["z"])
-                pt_bot = Origin + U_x.Multiply(n["x"]) + XYZ.BasisZ.Multiply(y_bc)
-                if (pt_top - pt_bot).GetLength() < MIN_MEMBER_LENGTH:
-                    continue
-                m_web = FramingMember(FramingMember.STUD, pt_bot, pt_top)
-                m_web.member_type = "WEB_BRACING"
-                m_web.family_name = family_web[0]
-                m_web.type_name = family_web[1]
-                m_web.rotation = _rotation_from_up(pt_top - pt_bot, XYZ.BasisZ)
-                m_web.host_kind = roof_info.kind
-                m_web.host_id = roof_info.element_id
-                m_web.disallow_end_joins = True
-                members.append(m_web)
+            web_spacing_in = getattr(self.config, 'web_spacing', 48.0)
+            web_spacing = web_spacing_in / 12.0
+            if web_spacing <= 0:
+                web_spacing = 4.0
                 
-            if s_plane["type"] == "HIP_JACK":
-                high_x = heel_x_L if filtered_nodes[0]["z"] > filtered_nodes[-1]["z"] else heel_x_R
-                high_z = None
-                for n in filtered_nodes:
-                    if abs(n["x"] - high_x) < 1e-3:
-                        high_z = n["z"]
-                        break
-                if high_z is not None and high_z > y_bc + 0.5:
-                    pt_top = Origin + U_x.Multiply(high_x) + XYZ.BasisZ.Multiply(high_z)
-                    pt_bot = Origin + U_x.Multiply(high_x) + XYZ.BasisZ.Multiply(y_bc)
-                    if (pt_top - pt_bot).GetLength() >= MIN_MEMBER_LENGTH:
-                        m_web = FramingMember(FramingMember.STUD, pt_bot, pt_top)
-                        m_web.member_type = "WEB_BRACING"
-                        m_web.family_name = family_web[0]
-                        m_web.type_name = family_web[1]
-                        m_web.rotation = _rotation_from_up(pt_top - pt_bot, XYZ.BasisZ)
-                        m_web.host_kind = roof_info.kind
-                        m_web.host_id = roof_info.element_id
-                        m_web.disallow_end_joins = True
-                        members.append(m_web)
+            web_x_vals = []
+            
+            # Left of king post
+            curr_x = king_x - web_spacing
+            while curr_x > heel_x_L + 0.5:
+                web_x_vals.append(curr_x)
+                curr_x -= web_spacing
+                
+            # King post
+            if heel_x_L - 1e-3 <= king_x <= heel_x_R + 1e-3:
+                web_x_vals.append(king_x)
+                
+            # Right of king post
+            curr_x = king_x + web_spacing
+            while curr_x < heel_x_R - 0.5:
+                web_x_vals.append(curr_x)
+                curr_x += web_spacing
+                
+            for w_x in web_x_vals:
+                best_z = -1e9
+                for s in segments:
+                    if s["x_min"] - 1e-3 <= w_x <= s["x_max"] + 1e-3:
+                        z_val = s["A"] * w_x + s["B"]
+                        if z_val > best_z:
+                            best_z = z_val
+                
+                if best_z > y_bc + MIN_MEMBER_LENGTH:
+                    pt_top = Origin + U_x.Multiply(w_x) + XYZ.BasisZ.Multiply(best_z)
+                    pt_bot = Origin + U_x.Multiply(w_x) + XYZ.BasisZ.Multiply(y_bc)
+                    m_web = FramingMember(FramingMember.STUD, pt_bot, pt_top)
+                    m_web.member_type = "WEB_BRACING"
+                    m_web.family_name = family_web[0]
+                    m_web.type_name = family_web[1]
+                    m_web.rotation = _rotation_from_up(pt_top - pt_bot, XYZ.BasisZ)
+                    m_web.host_kind = roof_info.kind
+                    m_web.host_id = roof_info.element_id
+                    m_web.disallow_end_joins = True
+                    members.append(m_web)
 
         try:
             members.extend(self._make_ridge_boards(ridge_edges, roof_info))
