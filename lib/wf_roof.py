@@ -774,6 +774,32 @@ class RoofTopologyGraph(object):
                 else:
                     edge.edge_type = "RAKE"
 
+    def print_diagnostics(self, total_unsnapped):
+        """Print topological diagnostics to the pyRevit output window."""
+        try:
+            from pyrevit import script
+            output = script.get_output()
+            
+            counts = {"RIDGE": 0, "HIP": 0, "VALLEY": 0, "EAVE": 0, "RAKE": 0, "UNKNOWN": 0}
+            for edge in self.edges.values():
+                etype = edge.edge_type or "UNKNOWN"
+                counts[etype] = counts.get(etype, 0) + 1
+                
+            output.print_md("### RoofTopologyGraph Summary")
+            output.print_md("- **Nodes Before Snap (un-merged loop vertices):** {}".format(total_unsnapped))
+            output.print_md("- **Nodes After Snap (merged graph nodes):** {}".format(len(self.nodes)))
+            for etype in sorted(counts.keys()):
+                output.print_md("  - **{}:** {}".format(etype, counts[etype]))
+                
+            # Log warning/diagnostic message if interior edges have less than 2 faces
+            for edge in self.edges.values():
+                if len(edge.faces) >= 2 and edge.edge_type not in ("RIDGE", "HIP", "VALLEY"):
+                    output.print_md("> **Warning:** Shared edge between faces {} classified as '{}' (expected RIDGE/HIP/VALLEY)".format(
+                        [f.index for f in edge.faces], edge.edge_type
+                    ))
+        except Exception:
+            pass
+
 
 # ======================================================================
 #  Engine
@@ -781,6 +807,16 @@ class RoofTopologyGraph(object):
 
 class RoofFramingEngine(BaseFramingEngine):
     """Calculates and places roof framing -- stick-frame or truss."""
+
+    def _get_roof_base_elevation(self, roof_info):
+        from Autodesk.Revit.DB import BuiltInParameter
+        try:
+            roof = roof_info.element
+            p_offset = roof.get_Parameter(BuiltInParameter.ROOF_LEVEL_OFFSET_PARAM)
+            offset = p_offset.AsDouble() if p_offset is not None else 0.0
+            return roof_info.level_elevation + offset
+        except Exception:
+            return roof_info.level_elevation
 
     def place_members(self, members, host_info):
         """Place roof members and apply roof-specific post-processing."""
@@ -918,6 +954,13 @@ class RoofFramingEngine(BaseFramingEngine):
         graph = RoofTopologyGraph(planes)
         graph.solve_geometry()
         graph.classify_edges()
+        
+        # Diagnostics
+        try:
+            total_unsnapped = sum(len(loop) for face in graph.faces for loop in face.plane_info.boundary_loops_local)
+            graph.print_diagnostics(total_unsnapped)
+        except Exception:
+            pass
         
         # 2. Rafter Dimensions
         rafter_family = self.config.stud_family_name
@@ -1357,8 +1400,14 @@ class RoofFramingEngine(BaseFramingEngine):
                     continue
 
                 # Push ceiling joist up by half its depth so its bottom rests exactly at the top plate elevation
-                joist_depth = 5.5 / 12.0
-                joist_z = min(foot_a.Z, foot_b.Z) + (joist_depth / 2.0)
+                joist_width, joist_depth = self._resolve_roof_member_size(
+                    self.config.stud_family_name,
+                    self.config.stud_type_name
+                )
+                if joist_depth is None or joist_depth <= 0.0:
+                    joist_depth = 5.5 / 12.0
+                roof_base_z = self._get_roof_base_elevation(roof_info)
+                joist_z = roof_base_z + (joist_depth / 2.0)
                 joist_a = XYZ(foot_a.X, foot_a.Y, joist_z)
                 joist_b = XYZ(foot_b.X, foot_b.Y, joist_z)
 
@@ -1926,6 +1975,13 @@ class RoofFramingEngine(BaseFramingEngine):
         graph.solve_geometry()
         graph.classify_edges()
         
+        # Diagnostics
+        try:
+            total_unsnapped = sum(len(loop) for face in graph.faces for loop in face.plane_info.boundary_loops_local)
+            graph.print_diagnostics(total_unsnapped)
+        except Exception:
+            pass
+        
         for face in graph.faces:
             layer_depth = self._resolve_roof_layer_top_depth(face.plane_info)
             face.d_shifted = face.d + layer_depth + tc_depth / 2.0
@@ -2029,7 +2085,8 @@ class RoofFramingEngine(BaseFramingEngine):
                 
             intersections_support = self._find_supports_along_slice(p_start_3d, p_end_3d, walls, beams)
             valid_zs = [pt.Z for pt in intersections_support if pt.Z < lowest_roof_z - 0.1]
-            joist_z = min(valid_zs) if valid_zs else lowest_roof_z - 1.5
+            roof_base_z = self._get_roof_base_elevation(roof_info)
+            joist_z = min(valid_zs) if valid_zs else roof_base_z
             
             y_bc = joist_z + bc_depth / 2.0
             
