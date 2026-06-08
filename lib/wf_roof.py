@@ -116,6 +116,8 @@ def _dist(a, b):
 
 
 def _normalize(v):
+    if v is None:
+        return None
     l = v.GetLength()
     if l < 1e-9:
         return None
@@ -2375,6 +2377,11 @@ class RoofFramingEngine(BaseFramingEngine):
                     y_ridge_node = (y_tc_end_L + y_tc_end_R) * 0.5
                 n_ridge = (x_ridge_node, y_ridge_node)
                 
+                m_L = m_L_lower
+                C_L = C_L_lower
+                m_R = m_R_lower
+                C_R = C_R_lower
+                
                 n_eave_L = (x_tc_start_L, y_tc_start_L)
                 n_eave_R = (x_tc_start_R, y_tc_start_R)
                 
@@ -2778,10 +2785,12 @@ class RoofFramingEngine(BaseFramingEngine):
                         horizontal_planes.add(pa_lower_edge)
                     if pb_lower_edge is not None:
                         horizontal_planes.add(pb_lower_edge)
-                else:
+                elif len(t_line) >= 4:
                     _, _, pa_edge, pb_edge = t_line[:4]
                     horizontal_planes.add(pa_edge)
                     horizontal_planes.add(pb_edge)
+                elif len(t_line) == 3:
+                    horizontal_planes.add(t_line[2])
 
             for plane in planes:
                 if plane.normal.Z >= FLAT_THRESHOLD:
