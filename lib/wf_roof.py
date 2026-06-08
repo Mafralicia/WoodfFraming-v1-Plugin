@@ -246,6 +246,72 @@ def _segment_length(start_point, end_point):
         return 0.0
 
 
+def _dist_point_to_segment_2d(p, s, e):
+    import math
+    dx = e[0] - s[0]
+    dy = e[1] - s[1]
+    l2 = dx*dx + dy*dy
+    if l2 < 1e-8:
+        return math.sqrt((p[0]-s[0])**2 + (p[1]-s[1])**2)
+    t = ((p[0]-s[0])*dx + (p[1]-s[1])*dy) / l2
+    t = max(0.0, min(1.0, t))
+    proj = (s[0] + t*dx, s[1] + t*dy)
+    return math.sqrt((p[0]-proj[0])**2 + (p[1]-proj[1])**2)
+
+
+def _plane_centroid(plane):
+    from Autodesk.Revit.DB import XYZ
+    if not plane.outer_loop_local:
+        return plane.origin
+    pts = []
+    for lx, ly in plane.outer_loop_local:
+        pts.append(_surface_point(plane, lx, ly))
+    if not pts:
+        return plane.origin
+    xs = [pt.X for pt in pts]
+    ys = [pt.Y for pt in pts]
+    zs = [pt.Z for pt in pts]
+    return XYZ(sum(xs)/len(pts), sum(ys)/len(pts), sum(zs)/len(pts))
+
+
+def _classify_shared_edge(rs, re, pa, pb):
+    from Autodesk.Revit.DB import XYZ
+    import math
+    mid = _midpoint(rs, re)
+    c_a = _plane_centroid(pa)
+    c_b = _plane_centroid(pb)
+    
+    edge_vec = re - rs
+    edge_len = edge_vec.GetLength()
+    if edge_len < 1e-4:
+        return "RIDGE_BOARD"
+    E = edge_vec.Multiply(1.0 / edge_len)
+    
+    t_a = pa.normal.CrossProduct(E)
+    if t_a.GetLength() > 1e-4:
+        t_a = _normalize(t_a)
+        if t_a.DotProduct(c_a - mid) < 0:
+            t_a = t_a.Multiply(-1.0)
+    else:
+        t_a = XYZ(0, 0, 0)
+        
+    t_b = pb.normal.CrossProduct(E)
+    if t_b.GetLength() > 1e-4:
+        t_b = _normalize(t_b)
+        if t_b.DotProduct(c_b - mid) < 0:
+            t_b = t_b.Multiply(-1.0)
+    else:
+        t_b = XYZ(0, 0, 0)
+        
+    if t_a.Z > 0.001 or t_b.Z > 0.001:
+        return "VALLEY_RAFTER"
+        
+    if abs(rs.Z - re.Z) < 0.15:
+        return "RIDGE_BOARD"
+    else:
+        return "HIP_RAFTER"
+
+
 def _find_ridge_edges(planes):
     """Find ridge edges -- shared boundary between two sloped faces.
 
@@ -733,7 +799,7 @@ class RoofFramingEngine(BaseFramingEngine):
                 member_type = getattr(member, "member_type", None)
                 if member_type == "RAFTER":
                     rafters.append(instance)
-                elif member_type in ("FASCIA", "LEDGER"):
+                elif member_type in ("FASCIA", "LEDGER", "RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER"):
                     boards.append(instance)
         else:
             for instance in placed_instances:
@@ -743,7 +809,7 @@ class RoofFramingEngine(BaseFramingEngine):
                 member_type = tracking.get("member")
                 if member_type == "RAFTER":
                     rafters.append(instance)
-                elif member_type in ("FASCIA", "LEDGER"):
+                elif member_type in ("FASCIA", "LEDGER", "RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER"):
                     boards.append(instance)
 
         if not rafters or not boards:
@@ -920,25 +986,45 @@ class RoofFramingEngine(BaseFramingEngine):
     # ------------------------------------------------------------------
 
     def _make_ridge_boards(self, ridge_edges, roof_info):
+        from Autodesk.Revit.DB import XYZ
         members = []
         seen = set()
         for rs, re, pa, pb in ridge_edges:
             if _dist(rs, re) < MIN_MEMBER_LENGTH:
                 continue
-            if pa.normal.DotProduct(pb.normal) > 0.5:
+            if pa.normal.DotProduct(pb.normal) > 0.999:
                 continue
             key = (_pt_key(rs), _pt_key(re))
             rkey = (_pt_key(re), _pt_key(rs))
             if key in seen or rkey in seen:
                 continue
             seen.add(key)
+            
+            # Classify edge
+            edge_type = _classify_shared_edge(rs, re, pa, pb)
+            
             m = FramingMember(FramingMember.HEADER, rs, re)
-            m.member_type = "RIDGE_BOARD"
+            m.member_type = edge_type
             m.family_name = (
                 self.config.header_family_name or self.config.stud_family_name)
             m.type_name = (
                 self.config.header_type_name or self.config.stud_type_name)
+            
+            # Resolve member depth
+            _, member_depth = self._resolve_roof_member_size(m.family_name, m.type_name)
+            if member_depth is None or member_depth <= 0.0:
+                member_depth = 7.25 / 12.0
+                
+            # Shift vertically down to sit under sheathing
+            depth_a = self._resolve_roof_layer_top_depth(pa)
+            depth_b = self._resolve_roof_layer_top_depth(pb)
+            depth_sync = max(depth_a, depth_b)
+            shift_z = depth_sync + member_depth / 2.0
+            
+            m.start_point = rs - XYZ(0, 0, shift_z)
+            m.end_point = re - XYZ(0, 0, shift_z)
             m.rotation = 0.0
+            m.disallow_end_joins = True
             m.host_kind = roof_info.kind
             m.host_id = roof_info.element_id
             members.append(m)
@@ -957,103 +1043,255 @@ class RoofFramingEngine(BaseFramingEngine):
         if spacing <= 0:
             return members
 
-        classified = _classify_boundary_edges(plane, ridge_edges)
-        eave_edges = classified["eave"]
-        if not eave_edges:
-            return self._make_rafters_scanline(plane, spacing, roof_info)
-
-        plane_ridges = []
-        for edge in ridge_edges:
-            rs, re, pa, pb = edge
+        # 1. Build a map of boundary segments to their classifications
+        segment_classes = {}
+        
+        # Look at shared edges (ridges, hips, valleys)
+        for rs, re, pa, pb in ridge_edges:
             if pa is plane or pb is plane:
-                plane_ridges.append(edge)
+                edge_type = _classify_shared_edge(rs, re, pa, pb)
+                k1 = (_pt_key(rs), _pt_key(re))
+                k2 = (_pt_key(re), _pt_key(rs))
+                segment_classes[k1] = (edge_type, pb if pa is plane else pa, rs, re)
+                segment_classes[k2] = (edge_type, pb if pa is plane else pa, re, rs)
+                
+        # Look at non-shared boundary edges
+        classified = _classify_boundary_edges(plane, ridge_edges)
+        for edge_start, edge_end in classified["eave"]:
+            k1 = (_pt_key(edge_start), _pt_key(edge_end))
+            k2 = (_pt_key(edge_end), _pt_key(edge_start))
+            segment_classes[k1] = ("EAVE", None, edge_start, edge_end)
+            segment_classes[k2] = ("EAVE", None, edge_end, edge_start)
+            
+        for edge_start, edge_end in classified["rake"]:
+            k1 = (_pt_key(edge_start), _pt_key(edge_end))
+            k2 = (_pt_key(edge_end), _pt_key(edge_start))
+            segment_classes[k1] = ("RAKE", None, edge_start, edge_end)
+            segment_classes[k2] = ("RAKE", None, edge_end, edge_start)
+            
+        for edge_start, edge_end in classified["ledger"]:
+            k1 = (_pt_key(edge_start), _pt_key(edge_end))
+            k2 = (_pt_key(edge_end), _pt_key(edge_start))
+            segment_classes[k1] = ("LEDGER", None, edge_start, edge_end)
+            segment_classes[k2] = ("LEDGER", None, edge_end, edge_start)
 
-        if not plane_ridges:
-            return self._make_rafters_scanline(plane, spacing, roof_info)
+        # Helper to find boundary segment class for a 2D local point
+        def find_boundary_segment_class(pt_local):
+            best_segment = None
+            min_d = 1e5
+            for loop in plane.boundary_loops_local:
+                count = len(loop)
+                for i in range(count):
+                    s_loc = loop[i]
+                    e_loc = loop[(i + 1) % count]
+                    d = _dist_point_to_segment_2d(pt_local, s_loc, e_loc)
+                    if d < min_d:
+                        min_d = d
+                        best_segment = (s_loc, e_loc)
+            if best_segment is None or min_d > 0.05:
+                return "RAKE", None, None, None
+                
+            s_loc, e_loc = best_segment
+            sw = _surface_point(plane, s_loc[0], s_loc[1])
+            ew = _surface_point(plane, e_loc[0], e_loc[1])
+            
+            k = (_pt_key(sw), _pt_key(ew))
+            if k in segment_classes:
+                return segment_classes[k]
+            rk = (_pt_key(ew), _pt_key(sw))
+            if rk in segment_classes:
+                return segment_classes[rk]
+                
+            best_match = ("RAKE", None, sw, ew)
+            min_wd = 0.5
+            for (sk, ek), val in segment_classes.items():
+                sw_c, ew_c = val[2], val[3]
+                d = _dist(sw, sw_c) + _dist(ew, ew_c)
+                rd = _dist(sw, ew_c) + _dist(ew, sw_c)
+                if d < min_wd:
+                    min_wd = d
+                    best_match = val
+                if rd < min_wd:
+                    min_wd = rd
+                    best_match = val
+            return best_match
 
-        # Resolve ridge board width to account for thickness
-        ridge_family = self.config.header_family_name or self.config.stud_family_name
-        ridge_type = self.config.header_type_name or self.config.stud_type_name
-        ridge_width, _ = self._resolve_roof_member_size(ridge_family, ridge_type)
-        if ridge_width is None or ridge_width <= 0.0:
-            ridge_width = 1.5 / 12.0
-
+        # Get local bounds of the plane
+        pts_local = [pt for loop in plane.boundary_loops_local for pt in loop]
+        if not pts_local:
+            return members
+            
+        min_x = min(pt[0] for pt in pts_local)
+        max_x = max(pt[0] for pt in pts_local)
+        
+        # Calculate global spacing reference to align rafters on opposing planes
+        ref_local_x = (XYZ(0, 0, 0) - plane.origin).DotProduct(plane.x_axis)
+        k_start = int(math.ceil((min_x - ref_local_x - 1e-4) / spacing))
+        k_end = int(math.floor((max_x - ref_local_x + 1e-4) / spacing))
+        
         seen = set()
-        for rs, re, pa, pb in plane_ridges:
-            # Orient ridge consistently to align spacing from same end on both slopes
-            if (rs.X, rs.Y, rs.Z) > (re.X, re.Y, re.Z):
-                r_start, r_end = re, rs
-            else:
-                r_start, r_end = rs, re
+        
+        # Rafter dimensions
+        rafter_family = self.config.stud_family_name
+        rafter_type = self.config.stud_type_name
+        rafter_width, rafter_depth = self._resolve_roof_member_size(rafter_family, rafter_type)
+        if rafter_width is None or rafter_width <= 0.0:
+            rafter_width = 1.5 / 12.0
+        if rafter_depth is None or rafter_depth <= 0.0:
+            rafter_depth = 5.5 / 12.0
+            
+        control_depth = self._resolve_roof_member_center_depth(plane, rafter_family, rafter_type)
 
-            ridge_dir = r_end - r_start
-            ridge_len = ridge_dir.GetLength()
-            if ridge_len < MIN_MEMBER_LENGTH:
-                continue
-            ridge_unit = ridge_dir.Multiply(1.0 / ridge_len)
-
-            positions = _rafter_positions(r_start, r_end, spacing)
-            for t in positions:
-                ridge_pt = r_start + ridge_unit.Multiply(t * ridge_len)
-                eave_pt = _project_to_best_eave(ridge_pt, eave_edges, r_start, r_end)
-                if eave_pt is None:
+        for k in range(k_start, k_end + 1):
+            x = ref_local_x + k * spacing
+            intervals = _scanline_intervals(plane.boundary_loops_local, "x", x)
+            for start_y, end_y in intervals:
+                if end_y - start_y < MIN_MEMBER_LENGTH:
                     continue
-                if _dist(eave_pt, ridge_pt) < MIN_MEMBER_LENGTH:
+                    
+                pt_upper_local = (x, start_y)
+                pt_lower_local = (x, end_y)
+                
+                pt_upper_world = _surface_point(plane, x, start_y)
+                pt_lower_world = _surface_point(plane, x, end_y)
+                
+                rafter_dir_world = pt_upper_world - pt_lower_world
+                rafter_len = rafter_dir_world.GetLength()
+                if rafter_len < MIN_MEMBER_LENGTH:
                     continue
-
-                # Get horizontal direction from ridge to eave (down-slope)
-                slope_vec = eave_pt - ridge_pt
-                slope_dir_xy = XYZ(slope_vec.X, slope_vec.Y, 0.0)
-                u_A = _normalize(slope_dir_xy)
-                if u_A is None:
-                    continue
-
-                # Determine opposing plane to synchronize heights
-                opposing_plane = pb if plane is pa else pa
-
-                # Resolve depths and slopes
-                depth_A = self._resolve_roof_member_center_depth(
-                    plane, self.config.stud_family_name, self.config.stud_type_name
-                )
-                cos_theta_A = max(0.1, plane.normal.Z)
-                sin_theta_A = math.sqrt(max(0.0, 1.0 - cos_theta_A * cos_theta_A))
-                V_A = (depth_A + 0.5 * ridge_width * sin_theta_A) / cos_theta_A
-
-                if opposing_plane is not None and opposing_plane.normal.Z < FLAT_THRESHOLD:
-                    depth_opp = self._resolve_roof_member_center_depth(
-                        opposing_plane, self.config.stud_family_name, self.config.stud_type_name
-                    )
-                    cos_theta_opp = max(0.1, opposing_plane.normal.Z)
-                    sin_theta_opp = math.sqrt(max(0.0, 1.0 - cos_theta_opp * cos_theta_opp))
-                    V_opp = (depth_opp + 0.5 * ridge_width * sin_theta_opp) / cos_theta_opp
+                U_rafter = rafter_dir_world.Multiply(1.0 / rafter_len)
+                
+                # Retrieve boundary classes
+                upper_class, opp_plane_upper, sw_up, ew_up = find_boundary_segment_class(pt_upper_local)
+                lower_class, opp_plane_lower, sw_lo, ew_lo = find_boundary_segment_class(pt_lower_local)
+                
+                # 3. Process upper point
+                if upper_class == "RIDGE_BOARD":
+                    opposing_plane = opp_plane_upper
+                    depth_A = control_depth
+                    cos_theta_A = max(0.1, plane.normal.Z)
+                    sin_theta_A = math.sqrt(max(0.0, 1.0 - cos_theta_A * cos_theta_A))
+                    
+                    ridge_family = self.config.header_family_name or self.config.stud_family_name
+                    ridge_type = self.config.header_type_name or self.config.stud_type_name
+                    ridge_width, _ = self._resolve_roof_member_size(ridge_family, ridge_type)
+                    if ridge_width is None or ridge_width <= 0.0:
+                        ridge_width = 1.5 / 12.0
+                        
+                    V_A = (depth_A + 0.5 * ridge_width * sin_theta_A) / cos_theta_A
+                    
+                    if opposing_plane is not None and opposing_plane.normal.Z < FLAT_THRESHOLD:
+                        depth_opp = self._resolve_roof_member_center_depth(
+                            opposing_plane, rafter_family, rafter_type
+                        )
+                        cos_theta_opp = max(0.1, opposing_plane.normal.Z)
+                        sin_theta_opp = math.sqrt(max(0.0, 1.0 - cos_theta_opp * cos_theta_opp))
+                        V_opp = (depth_opp + 0.5 * ridge_width * sin_theta_opp) / cos_theta_opp
+                    else:
+                        V_opp = 0.0
+                        
+                    V_sync = max(V_A, V_opp)
+                    
+                    slope_dir_xy = XYZ(plane.y_axis.X, plane.y_axis.Y, 0.0)
+                    u_A = _normalize(slope_dir_xy)
+                    if u_A is None:
+                        u_A = XYZ(0, 0, 0)
+                        
+                    shift_vec = u_A.Multiply(0.5 * ridge_width) - XYZ(0, 0, V_sync)
+                    rafter_end = pt_upper_world + shift_vec
+                    
+                elif upper_class in ("HIP_RAFTER", "VALLEY_RAFTER"):
+                    pt_shifted = pt_upper_world - control_depth * plane.normal
+                    hip_family = self.config.header_family_name or self.config.stud_family_name
+                    hip_type = self.config.header_type_name or self.config.stud_type_name
+                    hip_width, _ = self._resolve_roof_member_size(hip_family, hip_type)
+                    if hip_width is None or hip_width <= 0.0:
+                        hip_width = 1.5 / 12.0
+                        
+                    U_hip = _normalize(ew_up - sw_up)
+                    if U_hip is not None:
+                        cos_phi = abs(U_rafter.DotProduct(U_hip))
+                        sin_phi = math.sqrt(max(0.1, 1.0 - cos_phi * cos_phi))
+                        d_cutback = (0.5 * hip_width) / sin_phi
+                        rafter_end = pt_shifted - U_rafter.Multiply(d_cutback)
+                    else:
+                        rafter_end = pt_shifted
                 else:
-                    V_opp = 0.0
+                    rafter_end = pt_upper_world - control_depth * plane.normal
 
-                V_sync = max(V_A, V_opp)
+                # 4. Process lower point
+                if lower_class == "RIDGE_BOARD":
+                    opposing_plane = opp_plane_lower
+                    depth_A = control_depth
+                    cos_theta_A = max(0.1, plane.normal.Z)
+                    sin_theta_A = math.sqrt(max(0.0, 1.0 - cos_theta_A * cos_theta_A))
+                    
+                    ridge_family = self.config.header_family_name or self.config.stud_family_name
+                    ridge_type = self.config.header_type_name or self.config.stud_type_name
+                    ridge_width, _ = self._resolve_roof_member_size(ridge_family, ridge_type)
+                    if ridge_width is None or ridge_width <= 0.0:
+                        ridge_width = 1.5 / 12.0
+                        
+                    V_A = (depth_A + 0.5 * ridge_width * sin_theta_A) / cos_theta_A
+                    
+                    if opposing_plane is not None and opposing_plane.normal.Z < FLAT_THRESHOLD:
+                        depth_opp = self._resolve_roof_member_center_depth(
+                            opposing_plane, rafter_family, rafter_type
+                        )
+                        cos_theta_opp = max(0.1, opposing_plane.normal.Z)
+                        sin_theta_opp = math.sqrt(max(0.0, 1.0 - cos_theta_opp * cos_theta_opp))
+                        V_opp = (depth_opp + 0.5 * ridge_width * sin_theta_opp) / cos_theta_opp
+                    else:
+                        V_opp = 0.0
+                        
+                    V_sync = max(V_A, V_opp)
+                    
+                    slope_dir_xy = XYZ(plane.y_axis.X, plane.y_axis.Y, 0.0)
+                    u_A = _normalize(slope_dir_xy)
+                    if u_A is None:
+                        u_A = XYZ(0, 0, 0)
+                        
+                    shift_vec = u_A.Multiply(0.5 * ridge_width) - XYZ(0, 0, V_sync)
+                    rafter_start = pt_lower_world + shift_vec
+                    
+                elif lower_class in ("HIP_RAFTER", "VALLEY_RAFTER"):
+                    pt_shifted = pt_lower_world - control_depth * plane.normal
+                    hip_family = self.config.header_family_name or self.config.stud_family_name
+                    hip_type = self.config.header_type_name or self.config.stud_type_name
+                    hip_width, _ = self._resolve_roof_member_size(hip_family, hip_type)
+                    if hip_width is None or hip_width <= 0.0:
+                        hip_width = 1.5 / 12.0
+                        
+                    U_hip = _normalize(ew_lo - sw_lo)
+                    if U_hip is not None:
+                        cos_phi = abs(U_rafter.DotProduct(U_hip))
+                        sin_phi = math.sqrt(max(0.1, 1.0 - cos_phi * cos_phi))
+                        d_cutback = (0.5 * hip_width) / sin_phi
+                        rafter_start = pt_shifted + U_rafter.Multiply(d_cutback)
+                    else:
+                        rafter_start = pt_shifted
+                else:
+                    rafter_start = pt_lower_world - control_depth * plane.normal
 
-                # Shift both endpoints by the same horizontal ridge offset and vertical height sync
-                shift_vec = u_A.Multiply(0.5 * ridge_width) - XYZ(0, 0, V_sync)
-                rafter_start = eave_pt + shift_vec
-                rafter_end = ridge_pt + shift_vec
-
+                if _dist(rafter_start, rafter_end) < MIN_MEMBER_LENGTH:
+                    continue
+                    
                 key = (_pt_key(rafter_start), _pt_key(rafter_end))
                 rkey = (_pt_key(rafter_end), _pt_key(rafter_start))
                 if key in seen or rkey in seen:
                     continue
                 seen.add(key)
-
+                
                 m = FramingMember(FramingMember.STUD, rafter_start, rafter_end)
                 m.member_type = "RAFTER"
-                m.family_name = self.config.stud_family_name
-                m.type_name = self.config.stud_type_name
+                m.family_name = rafter_family
+                m.type_name = rafter_type
                 m.rotation = _rotation_from_up(rafter_end - rafter_start, plane.normal)
                 m.disallow_end_joins = True
                 m.host_kind = plane.kind
                 m.host_id = plane.element_id
                 members.append(m)
-
-        if not members:
-            return self._make_rafters_scanline(plane, spacing, roof_info)
+                
         return members
 
     def _make_rafters_scanline(self, plane, spacing, roof_info):
