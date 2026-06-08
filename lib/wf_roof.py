@@ -727,42 +727,44 @@ class RoofTopologyGraph(object):
                 face_list = list(edge.faces)
                 fa, fb = face_list[0], face_list[1]
                 z_diff = abs(edge.node_a.pt.Z - edge.node_b.pt.Z)
-                
-                mid = _midpoint(edge.node_a.pt, edge.node_b.pt)
-                c_a = _plane_centroid(fa.plane_info)
-                c_b = _plane_centroid(fb.plane_info)
-                
                 edge_vec = edge.node_b.pt - edge.node_a.pt
                 edge_len = edge_vec.GetLength()
+                
                 if edge_len < 1e-4:
                     edge.edge_type = "RIDGE"
                     continue
-                E = edge_vec.Multiply(1.0 / edge_len)
-                
-                t_a = fa.normal.CrossProduct(E)
-                if t_a.GetLength() > 1e-4:
-                    t_a = _normalize(t_a)
-                    if t_a.DotProduct(c_a - mid) < 0:
-                        t_a = t_a.Multiply(-1.0)
-                else:
-                    from Autodesk.Revit.DB import XYZ
-                    t_a = XYZ(0, 0, 0)
                     
-                t_b = fb.normal.CrossProduct(E)
-                if t_b.GetLength() > 1e-4:
-                    t_b = _normalize(t_b)
-                    if t_b.DotProduct(c_b - mid) < 0:
-                        t_b = t_b.Multiply(-1.0)
-                else:
-                    from Autodesk.Revit.DB import XYZ
-                    t_b = XYZ(0, 0, 0)
-                
-                if t_a.Z > 0.01 or t_b.Z > 0.01:
-                    edge.edge_type = "VALLEY"
-                elif (z_diff / edge_len) < 0.15 or z_diff < 0.25:
+                edge_slope = z_diff / edge_len
+                if edge_slope < 0.15 or z_diff < 0.25:
                     edge.edge_type = "RIDGE"
                 else:
-                    edge.edge_type = "HIP"
+                    # Distinguish HIP vs VALLEY using half-space check
+                    # Find a vertex on face A that is not on the edge
+                    pt_in_fa = None
+                    for loop in fa.loops_nodes:
+                        for n in loop:
+                            if n.key != edge.node_a.key and n.key != edge.node_b.key:
+                                # Check if it's not collinear
+                                vec = n.pt - edge.node_a.pt
+                                cross = vec.CrossProduct(edge_vec)
+                                if cross.GetLength() > 1e-4:
+                                    pt_in_fa = n.pt
+                                    break
+                        if pt_in_fa:
+                            break
+                            
+                    if pt_in_fa is None:
+                        # Fallback if no valid vertex found
+                        edge.edge_type = "HIP"
+                    else:
+                        # Since Revit roof normals point UP (out of the house volume),
+                        # a Valley (concave) means Face A's point is in the positive half-space of Face B.
+                        # A Hip (convex) means it is in the negative half-space.
+                        dist = fb.normal.DotProduct(pt_in_fa) + fb.d
+                        if dist > 0.001:
+                            edge.edge_type = "VALLEY"
+                        else:
+                            edge.edge_type = "HIP"
             else:
                 z_diff = abs(edge.node_a.pt.Z - edge.node_b.pt.Z)
                 edge_len = (edge.node_b.pt - edge.node_a.pt).GetLength()
@@ -1097,12 +1099,13 @@ class RoofFramingEngine(BaseFramingEngine):
                 
         if ridge_edges_for_ties and bool(getattr(self.config, "include_ceiling_joists", True)):
             try:
+                # `_make_ceiling_joists` expects: self, planes, ridge_edges, roof_info, spacing, include_kickers=True
                 members.extend(self._make_ceiling_joists(
                     planes,
                     ridge_edges_for_ties,
                     roof_info,
                     spacing,
-                    bool(getattr(self.config, "include_roof_kickers", True)),
+                    getattr(self.config, "include_kickers", True)
                 ))
             except Exception:
                 pass
@@ -1353,7 +1356,9 @@ class RoofFramingEngine(BaseFramingEngine):
                     d += spacing
                     continue
 
-                joist_z = min(foot_a.Z, foot_b.Z)
+                # Push ceiling joist up by half its depth so its bottom rests exactly at the top plate elevation
+                joist_depth = 5.5 / 12.0
+                joist_z = min(foot_a.Z, foot_b.Z) + (joist_depth / 2.0)
                 joist_a = XYZ(foot_a.X, foot_a.Y, joist_z)
                 joist_b = XYZ(foot_b.X, foot_b.Y, joist_z)
 
@@ -1366,7 +1371,7 @@ class RoofFramingEngine(BaseFramingEngine):
                         m.member_type = "CEILING_JOIST"
                         m.family_name = self.config.stud_family_name
                         m.type_name = self.config.stud_type_name
-                        m.rotation = -math.pi / 2.0  # flat
+                        m.rotation = 0.0  # on edge
                         m.host_kind = roof_info.kind
                         m.host_id = roof_info.element_id
                         members.append(m)
