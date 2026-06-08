@@ -103,6 +103,8 @@ class FrameRoofDialog(WPFWindow):
             self.cb_bc_type.IsEnabled = is_truss
         if hasattr(self, "cb_web_type") and self.cb_web_type:
             self.cb_web_type.IsEnabled = is_truss
+        if hasattr(self, "chk_include_kickers") and self.chk_include_kickers:
+            self.chk_include_kickers.IsEnabled = not is_truss
 
     def _on_truss_custom_checked(self, sender, args):
         self.tb_truss_custom.IsEnabled = True
