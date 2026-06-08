@@ -1973,10 +1973,17 @@ class RoofFramingEngine(BaseFramingEngine):
                     if p is pa:
                         continue
                     if p.normal.DotProduct(pa.normal) > 0.7:
-                        class_p = _classify_boundary_edges(p, ridge_edges, (rs, re))
-                        if class_p["eave"]:
-                            pa_lower = p
-                            break
+                        shares_edge = False
+                        for edge in ridge_edges:
+                            rs_edge, re_edge, pa_edge, pb_edge = edge
+                            if (pa_edge is pa and pb_edge is p) or (pa_edge is p and pb_edge is pa):
+                                shares_edge = True
+                                break
+                        if shares_edge:
+                            class_p = _classify_boundary_edges(p, ridge_edges, (rs, re))
+                            if class_p["eave"]:
+                                pa_lower = p
+                                break
 
                 pb_lower = None
                 for p in planes:
@@ -1985,10 +1992,17 @@ class RoofFramingEngine(BaseFramingEngine):
                     if p is pb:
                         continue
                     if p.normal.DotProduct(pb.normal) > 0.7:
-                        class_p = _classify_boundary_edges(p, ridge_edges, (rs, re))
-                        if class_p["eave"]:
-                            pb_lower = p
-                            break
+                        shares_edge = False
+                        for edge in ridge_edges:
+                            rs_edge, re_edge, pa_edge, pb_edge = edge
+                            if (pa_edge is pb and pb_edge is p) or (pa_edge is p and pb_edge is pb):
+                                shares_edge = True
+                                break
+                        if shares_edge:
+                            class_p = _classify_boundary_edges(p, ridge_edges, (rs, re))
+                            if class_p["eave"]:
+                                pb_lower = p
+                                break
 
                 class_a = _classify_boundary_edges(pa, ridge_edges, (rs, re))
                 class_b = _classify_boundary_edges(pb, ridge_edges, (rs, re))
