@@ -925,6 +925,9 @@ class RoofFramingEngine(BaseFramingEngine):
     # ------------------------------------------------------------------
 
     def _make_rafters_for_plane(self, plane, ridge_edges, roof_info):
+        from Autodesk.Revit.DB import XYZ
+        import math
+
         members = []
         spacing = self.config.stud_spacing_ft
         if spacing <= 0:
@@ -935,40 +938,91 @@ class RoofFramingEngine(BaseFramingEngine):
         if not eave_edges:
             return self._make_rafters_scanline(plane, spacing, roof_info)
 
-        plane_ridges = [(rs, re) for rs, re, pa, pb in ridge_edges
-                        if pa is plane or pb is plane]
+        plane_ridges = []
+        for edge in ridge_edges:
+            rs, re, pa, pb = edge
+            if pa is plane or pb is plane:
+                plane_ridges.append(edge)
+
         if not plane_ridges:
             return self._make_rafters_scanline(plane, spacing, roof_info)
 
-        plane_ridges.sort(key=lambda edge: _dist(edge[0], edge[1]), reverse=True)
-        ridge_s, ridge_e = plane_ridges[0]
-        eave_edges.sort(key=lambda e: _dist(e[0], e[1]), reverse=True)
+        # Resolve ridge board width to account for thickness
+        ridge_family = self.config.header_family_name or self.config.stud_family_name
+        ridge_type = self.config.header_type_name or self.config.stud_type_name
+        ridge_width, _ = self._resolve_roof_member_size(ridge_family, ridge_type)
+        if ridge_width is None or ridge_width <= 0.0:
+            ridge_width = 1.5 / 12.0
 
         seen = set()
-        for eave_s, eave_e in eave_edges:
-            eave_dir = eave_e - eave_s
-            eave_len = eave_dir.GetLength()
-            if eave_len < MIN_MEMBER_LENGTH:
-                continue
-            eave_dir = eave_dir.Multiply(1.0 / eave_len)
+        for rs, re, pa, pb in plane_ridges:
+            # Orient ridge consistently to align spacing from same end on both slopes
+            if (rs.X, rs.Y, rs.Z) > (re.X, re.Y, re.Z):
+                r_start, r_end = re, rs
+            else:
+                r_start, r_end = rs, re
 
-            positions = _rafter_positions(eave_s, eave_e, spacing)
+            ridge_dir = r_end - r_start
+            ridge_len = ridge_dir.GetLength()
+            if ridge_len < MIN_MEMBER_LENGTH:
+                continue
+            ridge_unit = ridge_dir.Multiply(1.0 / ridge_len)
+
+            positions = _rafter_positions(r_start, r_end, spacing)
             for t in positions:
-                eave_pt = eave_s + eave_dir.Multiply(t * eave_len)
-                ridge_pt = _project_to_ridge(eave_pt, ridge_s, ridge_e)
+                ridge_pt = r_start + ridge_unit.Multiply(t * ridge_len)
+                eave_pt = _project_to_best_eave(ridge_pt, eave_edges, r_start, r_end)
+                if eave_pt is None:
+                    continue
                 if _dist(eave_pt, ridge_pt) < MIN_MEMBER_LENGTH:
                     continue
-                key = (_pt_key(eave_pt), _pt_key(ridge_pt))
-                rkey = (_pt_key(ridge_pt), _pt_key(eave_pt))
+
+                # Get horizontal direction from ridge to eave (down-slope)
+                slope_vec = eave_pt - ridge_pt
+                slope_dir_xy = XYZ(slope_vec.X, slope_vec.Y, 0.0)
+                u_A = _normalize(slope_dir_xy)
+                if u_A is None:
+                    continue
+
+                # Determine opposing plane to synchronize heights
+                opposing_plane = pb if plane is pa else pa
+
+                # Resolve depths and slopes
+                depth_A = self._resolve_roof_member_center_depth(
+                    plane, self.config.stud_family_name, self.config.stud_type_name
+                )
+                cos_theta_A = max(0.1, plane.normal.Z)
+                sin_theta_A = math.sqrt(max(0.0, 1.0 - cos_theta_A * cos_theta_A))
+                V_A = (depth_A + 0.5 * ridge_width * sin_theta_A) / cos_theta_A
+
+                if opposing_plane is not None and opposing_plane.normal.Z < FLAT_THRESHOLD:
+                    depth_opp = self._resolve_roof_member_center_depth(
+                        opposing_plane, self.config.stud_family_name, self.config.stud_type_name
+                    )
+                    cos_theta_opp = max(0.1, opposing_plane.normal.Z)
+                    sin_theta_opp = math.sqrt(max(0.0, 1.0 - cos_theta_opp * cos_theta_opp))
+                    V_opp = (depth_opp + 0.5 * ridge_width * sin_theta_opp) / cos_theta_opp
+                else:
+                    V_opp = 0.0
+
+                V_sync = max(V_A, V_opp)
+
+                # Shift both endpoints by the same horizontal ridge offset and vertical height sync
+                shift_vec = u_A.Multiply(0.5 * ridge_width) - XYZ(0, 0, V_sync)
+                rafter_start = eave_pt + shift_vec
+                rafter_end = ridge_pt + shift_vec
+
+                key = (_pt_key(rafter_start), _pt_key(rafter_end))
+                rkey = (_pt_key(rafter_end), _pt_key(rafter_start))
                 if key in seen or rkey in seen:
                     continue
                 seen.add(key)
 
-                m = FramingMember(FramingMember.STUD, eave_pt, ridge_pt)
+                m = FramingMember(FramingMember.STUD, rafter_start, rafter_end)
                 m.member_type = "RAFTER"
                 m.family_name = self.config.stud_family_name
                 m.type_name = self.config.stud_type_name
-                m.rotation = _rotation_from_up(ridge_pt - eave_pt, plane.normal)
+                m.rotation = _rotation_from_up(rafter_end - rafter_start, plane.normal)
                 m.disallow_end_joins = True
                 m.host_kind = plane.kind
                 m.host_id = plane.element_id
