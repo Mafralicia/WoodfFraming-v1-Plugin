@@ -312,71 +312,6 @@ def _classify_shared_edge(rs, re, pa, pb):
         return "HIP_RAFTER"
 
 
-def _find_ridge_edges(planes):
-    """Find ridge edges -- shared boundary between two sloped faces.
-
-    Returns list of (start_xyz, end_xyz, plane_a, plane_b).
-    """
-    sloped = [p for p in planes if p.normal.Z < FLAT_THRESHOLD]
-    if len(sloped) < 2:
-        return []
-
-    all_edges = []
-    for plane in sloped:
-        for loop in plane.boundary_loops_local:
-            count = len(loop)
-            for i in range(count):
-                s_local = loop[i]
-                e_local = loop[(i + 1) % count]
-                s_world = _surface_point(plane, s_local[0], s_local[1])
-                e_world = _surface_point(plane, e_local[0], e_local[1])
-                all_edges.append((s_world, e_world, plane))
-
-    ridges = []
-    used = set()
-    for i in range(len(all_edges)):
-        if i in used:
-            continue
-        s1, e1, p1 = all_edges[i]
-        for j in range(i + 1, len(all_edges)):
-            if j in used:
-                continue
-            s2, e2, p2 = all_edges[j]
-            if p1 is p2:
-                continue
-            match = False
-            if _dist(s1, s2) < EDGE_TOL and _dist(e1, e2) < EDGE_TOL:
-                match = True
-            elif _dist(s1, e2) < EDGE_TOL and _dist(e1, s2) < EDGE_TOL:
-                match = True
-            if match:
-                avg_z = (s1.Z + e1.Z) / 2.0
-                ridges.append((s1, e1, p1, p2, avg_z))
-                used.add(i)
-                used.add(j)
-                break
-
-    if not ridges:
-        return []
-
-    # Keep all valid ridge segments (not only the top-most by Z).
-    unique = []
-    seen = set()
-    for s, e, pa, pb, z in ridges:
-        key = (_pt_key(s), _pt_key(e))
-        rkey = (_pt_key(e), _pt_key(s))
-        if key in seen or rkey in seen:
-            continue
-        seen.add(key)
-        unique.append((s, e, pa, pb))
-
-    unique.sort(
-        key=lambda r: (((r[0].Z + r[1].Z) / 2.0), _dist(r[0], r[1])),
-        reverse=True,
-    )
-    return unique
-
-
 def _get_non_ridge_edges(plane, ridge_edges):
     """Return all boundary edges of a plane that are NOT ridge edges."""
     ridge_set = set()
@@ -400,21 +335,11 @@ def _get_non_ridge_edges(plane, ridge_edges):
 
 
 def _classify_boundary_edges(plane, ridge_edges, ridge_segment=None):
-    """Classify non-ridge boundary edges into eave, rake, and ledger.
-
-    - ridge_dir: direction along the ridge (or plane.x_axis for sheds)
-    - Eave: parallel to ridge AND at lower Z  --> fascia goes here
-    - Ledger: parallel to ridge AND at higher Z  --> ledger beam (shed)
-    - Rake: perpendicular to ridge  --> barge/rake board
-
-    Returns dict with keys 'eave', 'rake', 'ledger', each a list of
-    (start_xyz, end_xyz) tuples.
-    """
+    """Classify non-ridge boundary edges into eave, rake, and ledger."""
     non_ridge = _get_non_ridge_edges(plane, ridge_edges)
     if not non_ridge:
         return {"eave": [], "rake": [], "ledger": []}
 
-    # Determine ridge direction for this plane
     if ridge_segment is not None:
         rs, re = ridge_segment
         ridge_dir = _normalize(re - rs)
@@ -429,14 +354,12 @@ def _classify_boundary_edges(plane, ridge_edges, ridge_segment=None):
             rs, re = plane_ridges[0]
             ridge_dir = _normalize(re - rs)
         else:
-            # Shed / no ridge: use plane x_axis (runs along the "ridge" direction)
             ridge_dir = _normalize(plane.x_axis)
 
     if ridge_dir is None:
         return {"eave": non_ridge, "rake": [], "ledger": []}
 
-    # Separate parallel vs perpendicular edges
-    parallel = []  # (start, end, avg_z)
+    parallel = []
     perpendicular = []
     for s, e in non_ridge:
         edge_dir = _normalize(e - s)
@@ -448,89 +371,6 @@ def _classify_boundary_edges(plane, ridge_edges, ridge_segment=None):
             parallel.append((s, e, avg_z))
         else:
             perpendicular.append((s, e))
-
-    # Split parallel edges into low (eave) and high (ledger)
-    eave = []
-    ledger = []
-    if parallel:
-        z_vals = [z for _, _, z in parallel]
-        z_min = min(z_vals)
-        z_max = max(z_vals)
-        z_mid = (z_min + z_max) / 2.0
-
-        if z_max - z_min < EDGE_TOL:
-            # All at same elevation -- all are eaves (flat case)
-            eave = [(s, e) for s, e, _ in parallel]
-        else:
-            for s, e, z in parallel:
-                if z <= z_mid:
-                    eave.append((s, e))
-                else:
-                    ledger.append((s, e))
-
-    return {"eave": eave, "rake": perpendicular, "ledger": ledger}
-
-
-def _classify_profile_boundary_edges(
-    plane,
-    loops_local,
-    depth_from_exterior,
-    ridge_edges=None,
-    ridge_segment=None,
-):
-    """Classify boundary edges from an explicit roof profile loop set."""
-    if not loops_local:
-        return {"eave": [], "rake": [], "ledger": []}
-
-    if ridge_segment is not None:
-        rs, re = ridge_segment
-        ridge_dir = _normalize(re - rs)
-    else:
-        ridge_dir = None
-        if ridge_edges:
-            plane_ridges = [(rs, re) for rs, re, pa, pb in ridge_edges
-                            if pa is plane or pb is plane]
-            if plane_ridges:
-                plane_ridges.sort(
-                    key=lambda edge: _dist(edge[0], edge[1]),
-                    reverse=True,
-                )
-                rs, re = plane_ridges[0]
-                ridge_dir = _normalize(re - rs)
-        if ridge_dir is None:
-            ridge_dir = _normalize(plane.x_axis)
-
-    if ridge_dir is None:
-        return {"eave": [], "rake": [], "ledger": []}
-
-    parallel = []
-    perpendicular = []
-    for loop in loops_local:
-        count = len(loop)
-        for index in range(count):
-            start_local = loop[index]
-            end_local = loop[(index + 1) % count]
-            start_world = _plane_point_at_depth(
-                plane,
-                start_local[0],
-                start_local[1],
-                depth_from_exterior,
-            )
-            end_world = _plane_point_at_depth(
-                plane,
-                end_local[0],
-                end_local[1],
-                depth_from_exterior,
-            )
-            edge_dir = _normalize(end_world - start_world)
-            if edge_dir is None:
-                continue
-            dot = abs(edge_dir.DotProduct(ridge_dir))
-            avg_z = (start_world.Z + end_world.Z) / 2.0
-            if dot >= PARALLEL_DOT_THRESHOLD:
-                parallel.append((start_world, end_world, avg_z))
-            else:
-                perpendicular.append((start_world, end_world))
 
     eave = []
     ledger = []
@@ -701,6 +541,259 @@ def _project_to_infinite_eave(ridge_pt, eave_edges):
 
 
 # ======================================================================
+#  Topology-Driven Constraint Solvers
+# ======================================================================
+
+def intersect_three_planes(n1, d1, n2, d2, n3, d3):
+    from Autodesk.Revit.DB import XYZ
+    denom = n1.DotProduct(n2.CrossProduct(n3))
+    if abs(denom) < 1e-6:
+        return None
+    cross23 = n2.CrossProduct(n3)
+    cross31 = n3.CrossProduct(n1)
+    cross12 = n1.CrossProduct(n2)
+    
+    term1 = cross23.Multiply(-d1)
+    term2 = cross31.Multiply(-d2)
+    term3 = cross12.Multiply(-d3)
+    
+    sum_terms = term1 + term2 + term3
+    return sum_terms.Multiply(1.0 / denom)
+
+
+def find_nearest_edge_in_face(pt_local, loops_local, edges, plane_info):
+    best_edge = None
+    min_dist = 1e9
+    for loop in loops_local:
+        count = len(loop)
+        for i in range(count):
+            s_loc = loop[i]
+            e_loc = loop[(i + 1) % count]
+            d = _dist_point_to_segment_2d(pt_local, s_loc, e_loc)
+            if d < min_dist:
+                min_dist = d
+                best_edge = (s_loc, e_loc)
+                
+    if best_edge is None:
+        return None
+        
+    s_loc, e_loc = best_edge
+    sw = _surface_point(plane_info, s_loc[0], s_loc[1])
+    ew = _surface_point(plane_info, e_loc[0], e_loc[1])
+    
+    for edge in edges:
+        d1 = _dist(edge.node_a.pt, sw) + _dist(edge.node_b.pt, ew)
+        d2 = _dist(edge.node_a.pt, ew) + _dist(edge.node_b.pt, sw)
+        if d1 < 0.1 or d2 < 0.1:
+            return edge
+            
+    return None
+
+
+class RoofNode(object):
+    def __init__(self, key, pt):
+        self.key = key
+        self.pt = pt
+        self.edges = set()
+        self.faces = set()
+
+
+class RoofEdge(object):
+    def __init__(self, node_a, node_b):
+        self.node_a = node_a
+        self.node_b = node_b
+        self.edge_type = None  # RIDGE, HIP, VALLEY, EAVE, RAKE
+        self.faces = set()
+
+
+class RoofFace(object):
+    def __init__(self, plane_info, index):
+        self.plane_info = plane_info
+        self.index = index
+        self.normal = plane_info.normal
+        self.d = -plane_info.normal.DotProduct(plane_info.origin)
+        self.d_shifted = self.d
+        self.loops_nodes = []
+        self.edges = []
+
+
+class RoofTopologyGraph(object):
+    def __init__(self, planes, snap_tolerance=0.05):
+        self.nodes = {}
+        self.edges = {}
+        self.faces = []
+        self.snap_tolerance = snap_tolerance
+        
+        # 1. Build faces
+        for idx, plane in enumerate(planes):
+            if plane.normal.Z >= FLAT_THRESHOLD:
+                continue
+            face = RoofFace(plane, idx)
+            self.faces.append(face)
+            
+        # 2. Extract and map loops to nodes
+        for face in self.faces:
+            for loop in face.plane_info.boundary_loops_local:
+                loop_nodes = []
+                for pt_local in loop:
+                    pt_world = _surface_point(face.plane_info, pt_local[0], pt_local[1])
+                    node = self._get_or_create_node(pt_world)
+                    loop_nodes.append(node)
+                if len(loop_nodes) >= 3:
+                    face.loops_nodes.append(loop_nodes)
+                    
+        # 3. Create edges
+        for face in self.faces:
+            for loop_nodes in face.loops_nodes:
+                count = len(loop_nodes)
+                for i in range(count):
+                    n_a = loop_nodes[i]
+                    n_b = loop_nodes[(i + 1) % count]
+                    edge = self._get_or_create_edge(n_a, n_b)
+                    edge.faces.add(face)
+                    face.edges.append(edge)
+                    n_a.faces.add(face)
+                    n_b.faces.add(face)
+                    
+    def _get_or_create_node(self, pt):
+        for node in self.nodes.values():
+            if _dist(node.pt, pt) < self.snap_tolerance:
+                return node
+        key = _pt_key(pt)
+        node = RoofNode(key, pt)
+        self.nodes[key] = node
+        return node
+        
+    def _get_or_create_edge(self, n_a, n_b):
+        key = (min(n_a.key, n_b.key), max(n_a.key, n_b.key))
+        if key in self.edges:
+            return self.edges[key]
+        edge = RoofEdge(n_a, n_b)
+        self.edges[key] = edge
+        n_a.edges.add(edge)
+        n_b.edges.add(edge)
+        return edge
+
+    def solve_geometry(self):
+        # 1. Determine eave height(s)
+        boundary_zs = []
+        for node in self.nodes.values():
+            is_boundary = any(len(edge.faces) == 1 for edge in node.edges)
+            if is_boundary:
+                boundary_zs.append(node.pt.Z)
+        
+        Z_eave = min(boundary_zs) if boundary_zs else 0.0
+        
+        # 2. Solve each node
+        solved_pts = {}
+        for key, node in self.nodes.items():
+            planes = []
+            for face in node.faces:
+                planes.append((face.normal, face.d))
+                
+            # Check if near eave Z
+            is_eave_node = False
+            for edge in node.edges:
+                if len(edge.faces) == 1:
+                    z_avg = (edge.node_a.pt.Z + edge.node_b.pt.Z) / 2.0
+                    if abs(z_avg - Z_eave) < 1.0:
+                        is_eave_node = True
+                        break
+            
+            if is_eave_node or abs(node.pt.Z - Z_eave) < 0.2:
+                from Autodesk.Revit.DB import XYZ
+                planes.append((XYZ(0, 0, 1), -Z_eave))
+                
+            solved_pt = None
+            if len(planes) >= 3:
+                for i in range(len(planes)):
+                    for j in range(i + 1, len(planes)):
+                        for k in range(j + 1, len(planes)):
+                            n1, d1 = planes[i]
+                            n2, d2 = planes[j]
+                            n3, d3 = planes[k]
+                            pt = intersect_three_planes(n1, d1, n2, d2, n3, d3)
+                            if pt is not None:
+                                solved_pt = pt
+                                break
+                        if solved_pt is not None:
+                            break
+                    if solved_pt is not None:
+                        break
+            
+            if solved_pt is None and len(planes) == 2:
+                n1, d1 = planes[0]
+                n2, d2 = planes[1]
+                u = _normalize(n1.CrossProduct(n2))
+                if u is not None:
+                    n3 = u
+                    d3 = -u.DotProduct(node.pt)
+                    solved_pt = intersect_three_planes(n1, d1, n2, d2, n3, d3)
+                    
+            if solved_pt is None and len(planes) >= 1:
+                n1, d1 = planes[0]
+                dist_to_plane = n1.DotProduct(node.pt) + d1
+                solved_pt = node.pt - n1.Multiply(dist_to_plane)
+                
+            if solved_pt is not None:
+                solved_pts[key] = solved_pt
+            else:
+                solved_pts[key] = node.pt
+                
+        for key, solved_pt in solved_pts.items():
+            self.nodes[key].pt = solved_pt
+
+    def classify_edges(self):
+        for edge in self.edges.values():
+            if len(edge.faces) == 2:
+                face_list = list(edge.faces)
+                fa, fb = face_list[0], face_list[1]
+                z_diff = abs(edge.node_a.pt.Z - edge.node_b.pt.Z)
+                
+                mid = _midpoint(edge.node_a.pt, edge.node_b.pt)
+                c_a = _plane_centroid(fa.plane_info)
+                c_b = _plane_centroid(fb.plane_info)
+                
+                edge_vec = edge.node_b.pt - edge.node_a.pt
+                edge_len = edge_vec.GetLength()
+                if edge_len < 1e-4:
+                    edge.edge_type = "RIDGE"
+                    continue
+                E = edge_vec.Multiply(1.0 / edge_len)
+                
+                t_a = fa.normal.CrossProduct(E)
+                if t_a.GetLength() > 1e-4:
+                    t_a = _normalize(t_a)
+                    if t_a.DotProduct(c_a - mid) < 0:
+                        t_a = t_a.Multiply(-1.0)
+                else:
+                    from Autodesk.Revit.DB import XYZ
+                    t_a = XYZ(0, 0, 0)
+                    
+                t_b = fb.normal.CrossProduct(E)
+                if t_b.GetLength() > 1e-4:
+                    t_b = _normalize(t_b)
+                    if t_b.DotProduct(c_b - mid) < 0:
+                        t_b = t_b.Multiply(-1.0)
+                else:
+                    from Autodesk.Revit.DB import XYZ
+                    t_b = XYZ(0, 0, 0)
+                
+                if t_a.Z > 0.01 or t_b.Z > 0.01:
+                    edge.edge_type = "VALLEY"
+                elif z_diff < 0.15:
+                    edge.edge_type = "RIDGE"
+                else:
+                    edge.edge_type = "HIP"
+            else:
+                z_diff = abs(edge.node_a.pt.Z - edge.node_b.pt.Z)
+                if z_diff < 0.15:
+                    edge.edge_type = "EAVE"
+                else:
+                    edge.edge_type = "RAKE"
+
+
+# ======================================================================
 #  Engine
 # ======================================================================
 
@@ -756,29 +849,11 @@ class RoofFramingEngine(BaseFramingEngine):
                 pass
 
     def calculate_members(self, roof, mode="stick"):
-        """Calculate framing members for a roof.
-
-        Args:
-            roof: Revit RoofBase element.
-            mode: "stick" for rafter framing, "truss" for truss placement.
-
-        Returns:
-            (members_list, roof_info) or ([], None) on failure.
-        """
+        """Calculate framing members for a roof."""
         roof_info = analyze_roof_host(self.doc, roof, self.config)
         if roof_info is None:
             return [], None
-        is_supported, support_reason, roof_type = _single_slope_support_status(
-            getattr(roof_info, "planes", []) or []
-        )
-        try:
-            roof_info.roof_type = roof_type
-            roof_info.single_slope_supported = is_supported
-            roof_info.single_slope_support_reason = support_reason
-        except Exception:
-            pass
-        if not is_supported and mode != "truss":
-            return [], roof_info
+            
         if mode == "truss":
             members = self._calc_truss_positions(roof_info)
         else:
@@ -797,9 +872,9 @@ class RoofFramingEngine(BaseFramingEngine):
         if member_pairs:
             for member, instance in member_pairs:
                 member_type = getattr(member, "member_type", None)
-                if member_type == "RAFTER":
+                if member_type in ("RAFTER", "TOP_CHORD", "BOTTOM_CHORD"):
                     rafters.append(instance)
-                elif member_type in ("FASCIA", "LEDGER", "RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER"):
+                elif member_type in ("FASCIA", "LEDGER", "RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER", "PURLIN"):
                     boards.append(instance)
         else:
             for instance in placed_instances:
@@ -807,9 +882,9 @@ class RoofFramingEngine(BaseFramingEngine):
                 if tracking is None:
                     continue
                 member_type = tracking.get("member")
-                if member_type == "RAFTER":
+                if member_type in ("RAFTER", "TOP_CHORD", "BOTTOM_CHORD"):
                     rafters.append(instance)
-                elif member_type in ("FASCIA", "LEDGER", "RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER"):
+                elif member_type in ("FASCIA", "LEDGER", "RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER", "PURLIN"):
                     boards.append(instance)
 
         if not rafters or not boards:
@@ -849,289 +924,20 @@ class RoofFramingEngine(BaseFramingEngine):
     # ------------------------------------------------------------------
 
     def _calc_stick_frame(self, roof_info):
-        members = []
-        planes = roof_info.planes
-        roof_type = _classify_roof(planes)
-        spacing = self.config.stud_spacing_ft
-        if spacing <= 0:
-            return members
-
-        # 1. Ridge detection
-        try:
-            ridge_edges = _find_ridge_edges(planes)
-        except Exception:
-            ridge_edges = []
-
-        members.extend(self._make_ridge_boards(ridge_edges, roof_info))
-
-        # 2. Rafters per slope + classify edges
-        all_eave_edges = []
-        all_rake_edges = []
-        all_ledger_edges = []
-        for plane in planes:
-            if plane.normal.Z >= FLAT_THRESHOLD:
-                continue
-
-            # Classify this plane's boundary edges
-            try:
-                edge_depth = 0.0
-                classified = _classify_boundary_edges(plane, ridge_edges)
-                if roof_type == "shed":
-                    edge_depth = self._resolve_roof_layer_top_depth(plane)
-                    profile_loops = self._roof_profile_loops_local(
-                        plane,
-                        edge_depth,
-                    )
-                    if profile_loops:
-                        classified = _classify_profile_boundary_edges(
-                            plane,
-                            profile_loops,
-                            edge_depth,
-                            ridge_edges,
-                        )
-                all_eave_edges.extend(
-                    (edge_start, edge_end, plane, "eave", edge_depth)
-                    for edge_start, edge_end in classified["eave"]
-                )
-                all_rake_edges.extend(
-                    (edge_start, edge_end, plane, "rake", edge_depth)
-                    for edge_start, edge_end in classified["rake"]
-                )
-                all_ledger_edges.extend(
-                    (edge_start, edge_end, plane, "ledger", edge_depth)
-                    for edge_start, edge_end in classified["ledger"]
-                )
-            except Exception:
-                pass
-
-            # Place rafters: ridged roofs prefer ridge/eave-controlled axes.
-            rafters = []
-            if ridge_edges and roof_type != "shed":
-                try:
-                    rafters = self._make_rafters_for_plane(
-                        plane, ridge_edges, roof_info)
-                except Exception:
-                    rafters = []
-                if not rafters:
-                    try:
-                        rafters = self._make_rafters_scanline(
-                            plane, spacing, roof_info)
-                    except Exception:
-                        rafters = []
-            else:
-                try:
-                    rafters = self._make_rafters_scanline(
-                        plane, spacing, roof_info)
-                except Exception:
-                    rafters = []
-                if not rafters and ridge_edges:
-                    try:
-                        rafters = self._make_rafters_for_plane(
-                            plane, ridge_edges, roof_info)
-                    except Exception:
-                        rafters = []
-            members.extend(rafters)
-
-        # 3. Collar ties per ridge segment.
-        if (
-            ridge_edges
-            and bool(getattr(self.config, "include_collar_ties", True))
-        ):
-            try:
-                members.extend(
-                    self._make_collar_ties(planes, ridge_edges, roof_info))
-            except Exception:
-                pass
-
-        # 4. Ceiling joists + kickers per ridge segment.
-        if (
-            ridge_edges
-            and bool(getattr(self.config, "include_ceiling_joists", True))
-        ):
-            try:
-                members.extend(
-                    self._make_ceiling_joists(
-                        planes,
-                        ridge_edges,
-                        roof_info,
-                        spacing,
-                        bool(getattr(self.config, "include_roof_kickers", True)),
-                    )
-                )
-            except Exception:
-                pass
-
-        # 5. Shed roofs need border members along the low eave and rakes.
-        fascia_edges = list(all_eave_edges)
-        if roof_type == "shed":
-            fascia_edges.extend(all_rake_edges)
-        try:
-            members.extend(
-                self._make_fascia(fascia_edges, roof_info))
-        except Exception:
-            pass
-
-        # 6. Ledger beam at high side (shed roofs)
-        if roof_type == "shed" and all_ledger_edges:
-            try:
-                members.extend(
-                    self._make_ledger(all_ledger_edges, roof_info))
-            except Exception:
-                pass
-
-        return members
-
-    # ------------------------------------------------------------------
-    #  Ridge boards
-    # ------------------------------------------------------------------
-
-    def _make_ridge_boards(self, ridge_edges, roof_info):
-        from Autodesk.Revit.DB import XYZ
-        members = []
-        seen = set()
-        for rs, re, pa, pb in ridge_edges:
-            if _dist(rs, re) < MIN_MEMBER_LENGTH:
-                continue
-            if pa.normal.DotProduct(pb.normal) > 0.999:
-                continue
-            key = (_pt_key(rs), _pt_key(re))
-            rkey = (_pt_key(re), _pt_key(rs))
-            if key in seen or rkey in seen:
-                continue
-            seen.add(key)
-            
-            # Classify edge
-            edge_type = _classify_shared_edge(rs, re, pa, pb)
-            
-            m = FramingMember(FramingMember.HEADER, rs, re)
-            m.member_type = edge_type
-            m.family_name = (
-                self.config.header_family_name or self.config.stud_family_name)
-            m.type_name = (
-                self.config.header_type_name or self.config.stud_type_name)
-            
-            # Resolve member depth
-            _, member_depth = self._resolve_roof_member_size(m.family_name, m.type_name)
-            if member_depth is None or member_depth <= 0.0:
-                member_depth = 7.25 / 12.0
-                
-            # Shift vertically down to sit under sheathing
-            depth_a = self._resolve_roof_layer_top_depth(pa)
-            depth_b = self._resolve_roof_layer_top_depth(pb)
-            depth_sync = max(depth_a, depth_b)
-            shift_z = depth_sync + member_depth / 2.0
-            
-            m.start_point = rs - XYZ(0, 0, shift_z)
-            m.end_point = re - XYZ(0, 0, shift_z)
-            m.rotation = 0.0
-            m.disallow_end_joins = True
-            m.host_kind = roof_info.kind
-            m.host_id = roof_info.element_id
-            members.append(m)
-        return members
-
-    # ------------------------------------------------------------------
-    #  Rafters
-    # ------------------------------------------------------------------
-
-    def _make_rafters_for_plane(self, plane, ridge_edges, roof_info):
         from Autodesk.Revit.DB import XYZ
         import math
-
         members = []
+        planes = roof_info.planes
         spacing = self.config.stud_spacing_ft
         if spacing <= 0:
             return members
-
-        # 1. Build a map of boundary segments to their classifications
-        segment_classes = {}
-        
-        # Look at shared edges (ridges, hips, valleys)
-        for rs, re, pa, pb in ridge_edges:
-            if pa is plane or pb is plane:
-                edge_type = _classify_shared_edge(rs, re, pa, pb)
-                k1 = (_pt_key(rs), _pt_key(re))
-                k2 = (_pt_key(re), _pt_key(rs))
-                segment_classes[k1] = (edge_type, pb if pa is plane else pa, rs, re)
-                segment_classes[k2] = (edge_type, pb if pa is plane else pa, re, rs)
-                
-        # Look at non-shared boundary edges
-        classified = _classify_boundary_edges(plane, ridge_edges)
-        for edge_start, edge_end in classified["eave"]:
-            k1 = (_pt_key(edge_start), _pt_key(edge_end))
-            k2 = (_pt_key(edge_end), _pt_key(edge_start))
-            segment_classes[k1] = ("EAVE", None, edge_start, edge_end)
-            segment_classes[k2] = ("EAVE", None, edge_end, edge_start)
             
-        for edge_start, edge_end in classified["rake"]:
-            k1 = (_pt_key(edge_start), _pt_key(edge_end))
-            k2 = (_pt_key(edge_end), _pt_key(edge_start))
-            segment_classes[k1] = ("RAKE", None, edge_start, edge_end)
-            segment_classes[k2] = ("RAKE", None, edge_end, edge_start)
-            
-        for edge_start, edge_end in classified["ledger"]:
-            k1 = (_pt_key(edge_start), _pt_key(edge_end))
-            k2 = (_pt_key(edge_end), _pt_key(edge_start))
-            segment_classes[k1] = ("LEDGER", None, edge_start, edge_end)
-            segment_classes[k2] = ("LEDGER", None, edge_end, edge_start)
-
-        # Helper to find boundary segment class for a 2D local point
-        def find_boundary_segment_class(pt_local):
-            best_segment = None
-            min_d = 1e5
-            for loop in plane.boundary_loops_local:
-                count = len(loop)
-                for i in range(count):
-                    s_loc = loop[i]
-                    e_loc = loop[(i + 1) % count]
-                    d = _dist_point_to_segment_2d(pt_local, s_loc, e_loc)
-                    if d < min_d:
-                        min_d = d
-                        best_segment = (s_loc, e_loc)
-            if best_segment is None or min_d > 0.05:
-                return "RAKE", None, None, None
-                
-            s_loc, e_loc = best_segment
-            sw = _surface_point(plane, s_loc[0], s_loc[1])
-            ew = _surface_point(plane, e_loc[0], e_loc[1])
-            
-            k = (_pt_key(sw), _pt_key(ew))
-            if k in segment_classes:
-                return segment_classes[k]
-            rk = (_pt_key(ew), _pt_key(sw))
-            if rk in segment_classes:
-                return segment_classes[rk]
-                
-            best_match = ("RAKE", None, sw, ew)
-            min_wd = 0.5
-            for (sk, ek), val in segment_classes.items():
-                sw_c, ew_c = val[2], val[3]
-                d = _dist(sw, sw_c) + _dist(ew, ew_c)
-                rd = _dist(sw, ew_c) + _dist(ew, sw_c)
-                if d < min_wd:
-                    min_wd = d
-                    best_match = val
-                if rd < min_wd:
-                    min_wd = rd
-                    best_match = val
-            return best_match
-
-        # Get local bounds of the plane
-        pts_local = [pt for loop in plane.boundary_loops_local for pt in loop]
-        if not pts_local:
-            return members
-            
-        min_x = min(pt[0] for pt in pts_local)
-        max_x = max(pt[0] for pt in pts_local)
+        # 1. Build and solve topology graph
+        graph = RoofTopologyGraph(planes)
+        graph.solve_geometry()
+        graph.classify_edges()
         
-        # Calculate global spacing reference to align rafters on opposing planes
-        ref_local_x = (XYZ(0, 0, 0) - plane.origin).DotProduct(plane.x_axis)
-        k_start = int(math.ceil((min_x - ref_local_x - 1e-4) / spacing))
-        k_end = int(math.floor((max_x - ref_local_x + 1e-4) / spacing))
-        
-        seen = set()
-        
-        # Rafter dimensions
+        # 2. Rafter Dimensions
         rafter_family = self.config.stud_family_name
         rafter_type = self.config.stud_type_name
         rafter_width, rafter_depth = self._resolve_roof_member_size(rafter_family, rafter_type)
@@ -1140,521 +946,332 @@ class RoofFramingEngine(BaseFramingEngine):
         if rafter_depth is None or rafter_depth <= 0.0:
             rafter_depth = 5.5 / 12.0
             
-        control_depth = self._resolve_roof_member_center_depth(plane, rafter_family, rafter_type)
-
-        for k in range(k_start, k_end + 1):
-            x = ref_local_x + k * spacing
-            intervals = _scanline_intervals(plane.boundary_loops_local, "x", x)
-            for start_y, end_y in intervals:
-                if end_y - start_y < MIN_MEMBER_LENGTH:
+        # Ridge and Hip dimensions
+        ridge_family = self.config.header_family_name or self.config.stud_family_name
+        ridge_type = self.config.header_type_name or self.config.stud_type_name
+        ridge_width, ridge_depth = self._resolve_roof_member_size(ridge_family, ridge_type)
+        if ridge_width is None or ridge_width <= 0.0:
+            ridge_width = 1.5 / 12.0
+        if ridge_depth is None or ridge_depth <= 0.0:
+            ridge_depth = 7.25 / 12.0
+            
+        # 3. Place Ridge Boards
+        ridge_seen = set()
+        ridge_edges_for_ties = []
+        for edge in graph.edges.values():
+            if edge.edge_type == "RIDGE":
+                key = (min(edge.node_a.key, edge.node_b.key), max(edge.node_a.key, edge.node_b.key))
+                if key in ridge_seen:
                     continue
-                    
-                pt_upper_local = (x, start_y)
-                pt_lower_local = (x, end_y)
+                ridge_seen.add(key)
                 
-                pt_upper_world = _surface_point(plane, x, start_y)
-                pt_lower_world = _surface_point(plane, x, end_y)
+                faces = list(edge.faces)
+                if len(faces) >= 2:
+                    ridge_edges_for_ties.append((edge.node_a.pt, edge.node_b.pt, faces[0].plane_info, faces[1].plane_info))
                 
-                rafter_dir_world = pt_upper_world - pt_lower_world
-                rafter_len = rafter_dir_world.GetLength()
-                if rafter_len < MIN_MEMBER_LENGTH:
-                    continue
-                U_rafter = rafter_dir_world.Multiply(1.0 / rafter_len)
+                m = FramingMember(FramingMember.HEADER, edge.node_a.pt, edge.node_b.pt)
+                m.member_type = "RIDGE_BOARD"
+                m.family_name = ridge_family
+                m.type_name = ridge_type
                 
-                # Retrieve boundary classes
-                upper_class, opp_plane_upper, sw_up, ew_up = find_boundary_segment_class(pt_upper_local)
-                lower_class, opp_plane_lower, sw_lo, ew_lo = find_boundary_segment_class(pt_lower_local)
-                
-                # 3. Process upper point
-                if upper_class == "RIDGE_BOARD":
-                    opposing_plane = opp_plane_upper
-                    depth_A = control_depth
-                    cos_theta_A = max(0.1, plane.normal.Z)
-                    sin_theta_A = math.sqrt(max(0.0, 1.0 - cos_theta_A * cos_theta_A))
-                    
-                    ridge_family = self.config.header_family_name or self.config.stud_family_name
-                    ridge_type = self.config.header_type_name or self.config.stud_type_name
-                    ridge_width, _ = self._resolve_roof_member_size(ridge_family, ridge_type)
-                    if ridge_width is None or ridge_width <= 0.0:
-                        ridge_width = 1.5 / 12.0
-                        
-                    V_A = (depth_A + 0.5 * ridge_width * sin_theta_A) / cos_theta_A
-                    
-                    if opposing_plane is not None and opposing_plane.normal.Z < FLAT_THRESHOLD:
-                        depth_opp = self._resolve_roof_member_center_depth(
-                            opposing_plane, rafter_family, rafter_type
-                        )
-                        cos_theta_opp = max(0.1, opposing_plane.normal.Z)
-                        sin_theta_opp = math.sqrt(max(0.0, 1.0 - cos_theta_opp * cos_theta_opp))
-                        V_opp = (depth_opp + 0.5 * ridge_width * sin_theta_opp) / cos_theta_opp
-                    else:
-                        V_opp = 0.0
-                        
-                    V_sync = max(V_A, V_opp)
-                    
-                    slope_dir_xy = XYZ(plane.y_axis.X, plane.y_axis.Y, 0.0)
-                    u_A = _normalize(slope_dir_xy)
-                    if u_A is None:
-                        u_A = XYZ(0, 0, 0)
-                        
-                    shift_vec = u_A.Multiply(0.5 * ridge_width) - XYZ(0, 0, V_sync)
-                    rafter_end = pt_upper_world + shift_vec
-                    
-                elif upper_class in ("HIP_RAFTER", "VALLEY_RAFTER"):
-                    pt_shifted = pt_upper_world - control_depth * plane.normal
-                    hip_family = self.config.header_family_name or self.config.stud_family_name
-                    hip_type = self.config.header_type_name or self.config.stud_type_name
-                    hip_width, _ = self._resolve_roof_member_size(hip_family, hip_type)
-                    if hip_width is None or hip_width <= 0.0:
-                        hip_width = 1.5 / 12.0
-                        
-                    U_hip = _normalize(ew_up - sw_up)
-                    if U_hip is not None:
-                        cos_phi = abs(U_rafter.DotProduct(U_hip))
-                        sin_phi = math.sqrt(max(0.1, 1.0 - cos_phi * cos_phi))
-                        d_cutback = (0.5 * hip_width) / sin_phi
-                        rafter_end = pt_shifted - U_rafter.Multiply(d_cutback)
-                    else:
-                        rafter_end = pt_shifted
-                else:
-                    rafter_end = pt_upper_world - control_depth * plane.normal
-
-                # 4. Process lower point
-                if lower_class == "RIDGE_BOARD":
-                    opposing_plane = opp_plane_lower
-                    depth_A = control_depth
-                    cos_theta_A = max(0.1, plane.normal.Z)
-                    sin_theta_A = math.sqrt(max(0.0, 1.0 - cos_theta_A * cos_theta_A))
-                    
-                    ridge_family = self.config.header_family_name or self.config.stud_family_name
-                    ridge_type = self.config.header_type_name or self.config.stud_type_name
-                    ridge_width, _ = self._resolve_roof_member_size(ridge_family, ridge_type)
-                    if ridge_width is None or ridge_width <= 0.0:
-                        ridge_width = 1.5 / 12.0
-                        
-                    V_A = (depth_A + 0.5 * ridge_width * sin_theta_A) / cos_theta_A
-                    
-                    if opposing_plane is not None and opposing_plane.normal.Z < FLAT_THRESHOLD:
-                        depth_opp = self._resolve_roof_member_center_depth(
-                            opposing_plane, rafter_family, rafter_type
-                        )
-                        cos_theta_opp = max(0.1, opposing_plane.normal.Z)
-                        sin_theta_opp = math.sqrt(max(0.0, 1.0 - cos_theta_opp * cos_theta_opp))
-                        V_opp = (depth_opp + 0.5 * ridge_width * sin_theta_opp) / cos_theta_opp
-                    else:
-                        V_opp = 0.0
-                        
-                    V_sync = max(V_A, V_opp)
-                    
-                    slope_dir_xy = XYZ(plane.y_axis.X, plane.y_axis.Y, 0.0)
-                    u_A = _normalize(slope_dir_xy)
-                    if u_A is None:
-                        u_A = XYZ(0, 0, 0)
-                        
-                    shift_vec = u_A.Multiply(0.5 * ridge_width) - XYZ(0, 0, V_sync)
-                    rafter_start = pt_lower_world + shift_vec
-                    
-                elif lower_class in ("HIP_RAFTER", "VALLEY_RAFTER"):
-                    pt_shifted = pt_lower_world - control_depth * plane.normal
-                    hip_family = self.config.header_family_name or self.config.stud_family_name
-                    hip_type = self.config.header_type_name or self.config.stud_type_name
-                    hip_width, _ = self._resolve_roof_member_size(hip_family, hip_type)
-                    if hip_width is None or hip_width <= 0.0:
-                        hip_width = 1.5 / 12.0
-                        
-                    U_hip = _normalize(ew_lo - sw_lo)
-                    if U_hip is not None:
-                        cos_phi = abs(U_rafter.DotProduct(U_hip))
-                        sin_phi = math.sqrt(max(0.1, 1.0 - cos_phi * cos_phi))
-                        d_cutback = (0.5 * hip_width) / sin_phi
-                        rafter_start = pt_shifted + U_rafter.Multiply(d_cutback)
-                    else:
-                        rafter_start = pt_shifted
-                else:
-                    rafter_start = pt_lower_world - control_depth * plane.normal
-
-                if _dist(rafter_start, rafter_end) < MIN_MEMBER_LENGTH:
-                    continue
-                    
-                key = (_pt_key(rafter_start), _pt_key(rafter_end))
-                rkey = (_pt_key(rafter_end), _pt_key(rafter_start))
-                if key in seen or rkey in seen:
-                    continue
-                seen.add(key)
-                
-                m = FramingMember(FramingMember.STUD, rafter_start, rafter_end)
-                m.member_type = "RAFTER"
-                m.family_name = rafter_family
-                m.type_name = rafter_type
-                m.rotation = _rotation_from_up(rafter_end - rafter_start, plane.normal)
+                depth_sync = 0.0
+                for face in edge.faces:
+                    depth_sync = max(depth_sync, self._resolve_roof_layer_top_depth(face.plane_info))
+                shift_z = depth_sync + ridge_depth / 2.0
+                m.start_point = edge.node_a.pt - XYZ(0, 0, shift_z)
+                m.end_point = edge.node_b.pt - XYZ(0, 0, shift_z)
+                m.rotation = 0.0
                 m.disallow_end_joins = True
-                m.host_kind = plane.kind
-                m.host_id = plane.element_id
+                m.host_kind = roof_info.kind
+                m.host_id = roof_info.element_id
                 members.append(m)
                 
-        return members
-
-    def _make_rafters_scanline(self, plane, spacing, roof_info):
-        """Fallback for shed / flat roofs with no ridge."""
-        members = []
-        family_name = self.config.stud_family_name
-        type_name = self.config.stud_type_name
-        control_depth = self._resolve_roof_member_center_depth(
-            plane,
-            family_name,
-            type_name,
-        )
-        profile_loops = self._roof_profile_loops_local(plane, control_depth)
-        if not profile_loops:
-            return members
-
-        points = [point for loop in profile_loops for point in loop]
-        if not points:
-            return members
-
-        min_x = min(point[0] for point in points)
-        max_x = max(point[0] for point in points)
-        min_y = min(point[1] for point in points)
-        max_y = max(point[1] for point in points)
-        if max_y - min_y < MIN_MEMBER_LENGTH:
-            return members
-
-        x = min_x
-        while x <= max_x + 1e-9:
-            intervals = _scanline_intervals(profile_loops, "x", x)
-            for start_y, end_y in intervals:
-                if end_y - start_y < MIN_MEMBER_LENGTH:
-                    continue
-                s_pt = _plane_point_at_depth(plane, x, start_y, control_depth)
-                e_pt = _plane_point_at_depth(plane, x, end_y, control_depth)
-                original_length = _dist(s_pt, e_pt)
-                clipped = self._clip_member_axis_to_roof(plane.element, s_pt, e_pt)
-                if clipped is not None:
-                    clipped_length = _dist(clipped[0], clipped[1])
-                    if clipped_length <= original_length + 1e-6:
-                        s_pt, e_pt = clipped
-                if _dist(s_pt, e_pt) < MIN_MEMBER_LENGTH:
-                    continue
-                m = FramingMember(FramingMember.STUD, s_pt, e_pt)
-                m.member_type = "RAFTER"
-                m.family_name = self.config.stud_family_name
-                m.type_name = self.config.stud_type_name
-                m.rotation = _rotation_from_up(e_pt - s_pt, plane.normal)
+        # 4. Place Hip and Valley Rafters
+        for edge in graph.edges.values():
+            if edge.edge_type in ("HIP", "VALLEY"):
+                m = FramingMember(FramingMember.HEADER, edge.node_a.pt, edge.node_b.pt)
+                m.member_type = "HIP_RAFTER" if edge.edge_type == "HIP" else "VALLEY_RAFTER"
+                m.family_name = ridge_family
+                m.type_name = ridge_type
+                
+                avg_normal = XYZ(0, 0, 0)
+                depth_sync = 0.0
+                for face in edge.faces:
+                    avg_normal = avg_normal + face.normal
+                    depth_sync = max(depth_sync, self._resolve_roof_layer_top_depth(face.plane_info))
+                if len(edge.faces) > 0:
+                    avg_normal = avg_normal.Multiply(1.0 / len(edge.faces)).Normalize()
+                else:
+                    avg_normal = XYZ(0, 0, 1)
+                    
+                shift = avg_normal.Multiply(depth_sync + ridge_depth / 2.0)
+                m.start_point = edge.node_a.pt - shift
+                m.end_point = edge.node_b.pt - shift
+                
+                m.rotation = _rotation_from_up(edge.node_b.pt - edge.node_a.pt, avg_normal)
                 m.disallow_end_joins = True
-                m.host_kind = plane.kind
-                m.host_id = plane.element_id
+                m.host_kind = roof_info.kind
+                m.host_id = roof_info.element_id
                 members.append(m)
-            x += spacing
+                
+        # 5. Place Common and Jack Rafters
+        for face in graph.faces:
+            local_loops = []
+            for loop in face.loops_nodes:
+                local_loop = []
+                for node in loop:
+                    pt_loc = _to_local(node.pt, face.plane_info.origin, face.plane_info.x_axis, face.plane_info.y_axis)
+                    local_loop.append(pt_loc)
+                if len(local_loop) >= 3:
+                    local_loops.append(local_loop)
+                    
+            if not local_loops:
+                continue
+                
+            all_pts = [pt for loop in local_loops for pt in loop]
+            min_x = min(pt[0] for pt in all_pts)
+            max_x = max(pt[0] for pt in all_pts)
+            
+            ref_local_x = (XYZ(0,0,0) - face.plane_info.origin).DotProduct(face.plane_info.x_axis)
+            k_start = int(math.ceil((min_x - ref_local_x - 1e-4) / spacing))
+            k_end = int(math.floor((max_x - ref_local_x + 1e-4) / spacing))
+            
+            control_depth = self._resolve_roof_member_center_depth(face.plane_info, rafter_family, rafter_type)
+            
+            for k in range(k_start, k_end + 1):
+                x = ref_local_x + k * spacing
+                intervals = _scanline_intervals(local_loops, "x", x)
+                for start_y, end_y in intervals:
+                    if end_y - start_y < MIN_MEMBER_LENGTH:
+                        continue
+                        
+                    pt_upper_loc = (x, start_y)
+                    pt_lower_loc = (x, end_y)
+                    
+                    pt_upper_world = _surface_point(face.plane_info, x, start_y)
+                    pt_lower_world = _surface_point(face.plane_info, x, end_y)
+                    
+                    pt_upper_shifted = pt_upper_world - face.normal.Multiply(control_depth)
+                    pt_lower_shifted = pt_lower_world - face.normal.Multiply(control_depth)
+                    
+                    rafter_dir = _normalize(pt_lower_shifted - pt_upper_shifted)
+                    if rafter_dir is None:
+                        continue
+                        
+                    upper_edge = find_nearest_edge_in_face(pt_upper_loc, local_loops, face.edges, face.plane_info)
+                    lower_edge = find_nearest_edge_in_face(pt_lower_loc, local_loops, face.edges, face.plane_info)
+                    
+                    # Apply cutbacks
+                    if upper_edge is not None:
+                        if upper_edge.edge_type == "RIDGE":
+                            pt_upper_shifted = pt_upper_shifted + rafter_dir.Multiply(ridge_width / 2.0)
+                        elif upper_edge.edge_type in ("HIP", "VALLEY"):
+                            edge_dir = _normalize(upper_edge.node_b.pt - upper_edge.node_a.pt)
+                            if edge_dir is not None:
+                                cos_phi = abs(rafter_dir.DotProduct(edge_dir))
+                                sin_phi = math.sqrt(max(0.1, 1.0 - cos_phi * cos_phi))
+                                d_cutback = (ridge_width / 2.0) / sin_phi
+                                pt_upper_shifted = pt_upper_shifted + rafter_dir.Multiply(d_cutback)
+                            else:
+                                pt_upper_shifted = pt_upper_shifted + rafter_dir.Multiply(ridge_width / 2.0)
+                                
+                    if lower_edge is not None:
+                        if lower_edge.edge_type == "VALLEY":
+                            edge_dir = _normalize(lower_edge.node_b.pt - lower_edge.node_a.pt)
+                            if edge_dir is not None:
+                                cos_phi = abs(rafter_dir.DotProduct(edge_dir))
+                                sin_phi = math.sqrt(max(0.1, 1.0 - cos_phi * cos_phi))
+                                d_cutback = (ridge_width / 2.0) / sin_phi
+                                pt_lower_shifted = pt_lower_shifted - rafter_dir.Multiply(d_cutback)
+                            else:
+                                pt_lower_shifted = pt_lower_shifted - rafter_dir.Multiply(ridge_width / 2.0)
+                        elif lower_edge.edge_type in ("HIP", "RIDGE"):
+                            edge_dir = _normalize(lower_edge.node_b.pt - lower_edge.node_a.pt)
+                            if edge_dir is not None:
+                                cos_phi = abs(rafter_dir.DotProduct(edge_dir))
+                                sin_phi = math.sqrt(max(0.1, 1.0 - cos_phi * cos_phi))
+                                d_cutback = (ridge_width / 2.0) / sin_phi
+                                pt_lower_shifted = pt_lower_shifted - rafter_dir.Multiply(d_cutback)
+                            else:
+                                pt_lower_shifted = pt_lower_shifted - rafter_dir.Multiply(ridge_width / 2.0)
+                                
+                    if _dist(pt_upper_shifted, pt_lower_shifted) < MIN_MEMBER_LENGTH:
+                        continue
+                        
+                    m = FramingMember(FramingMember.STUD, pt_lower_shifted, pt_upper_shifted)
+                    m.member_type = "RAFTER"
+                    m.family_name = rafter_family
+                    m.type_name = rafter_type
+                    m.rotation = _rotation_from_up(pt_upper_shifted - pt_lower_shifted, face.normal)
+                    m.disallow_end_joins = True
+                    m.host_kind = face.plane_info.kind
+                    m.host_id = face.plane_info.element_id
+                    members.append(m)
+
+        # 6. Collar ties & Ceiling joists
+        if ridge_edges_for_ties and bool(getattr(self.config, "include_collar_ties", True)):
+            try:
+                members.extend(self._make_collar_ties(planes, ridge_edges_for_ties, roof_info))
+            except Exception:
+                pass
+                
+        if ridge_edges_for_ties and bool(getattr(self.config, "include_ceiling_joists", True)):
+            try:
+                members.extend(self._make_ceiling_joists(
+                    planes,
+                    ridge_edges_for_ties,
+                    roof_info,
+                    spacing,
+                    bool(getattr(self.config, "include_roof_kickers", True)),
+                ))
+            except Exception:
+                pass
+
+        # 7. Continuous Purlins
+        try:
+            members.extend(self._make_purlins(graph, roof_info, mode="stick"))
+        except Exception:
+            pass
+
+        # 8. Border members (Fascia & Ledger)
+        all_eave_edges = []
+        all_rake_edges = []
+        all_ledger_edges = []
+        
+        for face in graph.faces:
+            for edge in face.edges:
+                if len(edge.faces) == 1:
+                    edge_depth = self._resolve_roof_layer_top_depth(face.plane_info)
+                    role = "eave" if edge.edge_type == "EAVE" else ("ledger" if edge.edge_type == "RIDGE" else "rake")
+                    triple = (edge.node_a.pt, edge.node_b.pt, face.plane_info, role, edge_depth)
+                    if edge.edge_type == "EAVE":
+                        all_eave_edges.append(triple)
+                    elif edge.edge_type == "RAKE":
+                        all_rake_edges.append(triple)
+                    else:
+                        all_ledger_edges.append(triple)
+
+        fascia_edges = list(all_eave_edges)
+        if len(graph.faces) == 1:
+            fascia_edges.extend(all_rake_edges)
+            
+        try:
+            members.extend(self._make_fascia(fascia_edges, roof_info))
+        except Exception:
+            pass
+            
+        if len(graph.faces) == 1 and all_ledger_edges:
+            try:
+                members.extend(self._make_ledger(all_ledger_edges, roof_info))
+            except Exception:
+                pass
+
         return members
 
     def _resolve_roof_member_center_depth(self, plane, family_name, type_name):
         """Return the control-plane depth for a roof framing member centerline."""
         layer_top_depth = self._resolve_roof_layer_top_depth(plane)
         _, member_depth = self._resolve_roof_member_size(family_name, type_name)
-        if member_depth > 0.0:
+        if member_depth is not None and member_depth > 0.0:
             return layer_top_depth + (member_depth / 2.0)
-
-        target_layer_depth = getattr(plane, "target_layer_depth", 0.0)
-        if target_layer_depth > 0.0:
-            return target_layer_depth
         return layer_top_depth
 
-    def _roof_profile_loops_local(self, plane, depth_from_exterior):
-        """Derive a roof member control profile from adjacent roof faces."""
-        if depth_from_exterior <= 1e-9:
-            return plane.boundary_loops_local
-
-        adjacent_faces = self._collect_adjacent_roof_faces(plane.element, plane.normal)
-        if not adjacent_faces:
-            return plane.boundary_loops_local
-
-        shifted_loops = []
-        for loop in plane.boundary_loops_local:
-            world_loop = [
-                _surface_point(plane, local_x, local_y)
-                for local_x, local_y in loop
-            ]
-            shifted_loop = self._shift_roof_loop_local(
-                plane,
-                world_loop,
-                depth_from_exterior,
-                adjacent_faces,
-            )
-            if shifted_loop is None:
-                return plane.boundary_loops_local
-            shifted_loops.append(shifted_loop)
-
-        return shifted_loops
-
-    def _collect_adjacent_roof_faces(self, roof, top_normal):
-        """Collect non-coplanar roof faces that can bound the framing profile."""
-        from Autodesk.Revit.DB import GeometryInstance, Options, Solid, ViewDetailLevel
-
-        try:
-            options = Options()
-            options.ComputeReferences = False
-            options.DetailLevel = ViewDetailLevel.Fine
-            geometry = roof.get_Geometry(options)
-        except Exception:
-            geometry = None
-        if geometry is None:
-            return []
-
-        solids = []
-        for geom_obj in geometry:
-            if isinstance(geom_obj, Solid) and geom_obj.Volume > 0:
-                solids.append(geom_obj)
-                continue
-            if isinstance(geom_obj, GeometryInstance):
-                try:
-                    instance_geometry = geom_obj.GetInstanceGeometry()
-                except Exception:
-                    instance_geometry = None
-                if instance_geometry is None:
-                    continue
-                for sub_obj in instance_geometry:
-                    if isinstance(sub_obj, Solid) and sub_obj.Volume > 0:
-                        solids.append(sub_obj)
-
-        adjacent_faces = []
-        for solid in solids:
-            for face in solid.Faces:
-                face_normal = _face_normal(face)
-                if face_normal is None:
-                    continue
-                if abs(face_normal.DotProduct(top_normal)) > 0.9999:
-                    continue
-                face_loops = _extract_face_loops(face)
-                if face_loops:
-                    adjacent_faces.append((face_normal, face_loops))
-
-        return adjacent_faces
-
-    def _shift_roof_loop_local(self, plane, loop_points, depth_from_exterior, adjacent_faces):
-        """Project a top-face loop down to a parallel control plane via adjacent faces."""
-        if len(loop_points) < 3:
-            return None
-
-        shifted_lines = []
-        for index in range(len(loop_points)):
-            start_point = loop_points[index]
-            end_point = loop_points[(index + 1) % len(loop_points)]
-            edge_dir = _normalize(end_point - start_point)
-            if edge_dir is None:
-                return None
-
-            face_normal = self._find_adjacent_face_normal(
-                adjacent_faces,
-                start_point,
-                end_point,
-            )
-            if face_normal is None:
-                return None
-
-            move_axis = _normalize(edge_dir.CrossProduct(face_normal))
-            denominator = plane.normal.DotProduct(move_axis) if move_axis is not None else 0.0
-            if move_axis is None or abs(denominator) < 1e-9:
-                move_axis = _normalize(face_normal.CrossProduct(edge_dir))
-                denominator = plane.normal.DotProduct(move_axis) if move_axis is not None else 0.0
-            if move_axis is None or abs(denominator) < 1e-9:
-                return None
-
-            distance = -depth_from_exterior / denominator
-            shift_vec = move_axis.Multiply(distance)
-            shift_x = shift_vec.DotProduct(plane.x_axis)
-            shift_y = shift_vec.DotProduct(plane.y_axis)
-
-            start_local = _to_local(start_point, plane.origin, plane.x_axis, plane.y_axis)
-            end_local = _to_local(end_point, plane.origin, plane.x_axis, plane.y_axis)
-            shifted_lines.append(
-                (
-                    (start_local[0] + shift_x, start_local[1] + shift_y),
-                    (end_local[0] + shift_x, end_local[1] + shift_y),
-                )
-            )
-
-        shifted_loop = []
-        for index in range(len(shifted_lines)):
-            prev_line = shifted_lines[index - 1]
-            curr_line = shifted_lines[index]
-            point = _line_intersection_2d(prev_line, curr_line)
-            if point is None:
-                point = curr_line[0]
-            shifted_loop.append(point)
-
-        return shifted_loop
-
-    def _find_adjacent_face_normal(self, adjacent_faces, start_point, end_point):
-        """Find the non-coplanar roof face that shares a boundary segment."""
-        for face_normal, loops in adjacent_faces:
-            for loop in loops:
-                count = len(loop)
-                for index in range(count):
-                    face_start = loop[index]
-                    face_end = loop[(index + 1) % count]
-                    if _same_segment(start_point, end_point, face_start, face_end):
-                        return face_normal
-        return None
-
-    def _get_roof_solids(self, roof):
-        """Return cached positive-volume solids for a roof element."""
-        from Autodesk.Revit.DB import GeometryInstance, Options, Solid, ViewDetailLevel
-
-        cache = getattr(self, "_roof_solids_cache", None)
-        if cache is None:
-            cache = {}
-            self._roof_solids_cache = cache
-
-        key = getattr(getattr(roof, "Id", None), "IntegerValue", None)
-        if key in cache:
-            return cache[key]
-
-        solids = []
-        try:
-            options = Options()
-            options.ComputeReferences = False
-            options.DetailLevel = ViewDetailLevel.Fine
-            geometry = roof.get_Geometry(options)
-        except Exception:
-            geometry = None
-
-        if geometry is not None:
-            for geom_obj in geometry:
-                if isinstance(geom_obj, Solid) and geom_obj.Volume > 0:
-                    solids.append(geom_obj)
-                    continue
-                if isinstance(geom_obj, GeometryInstance):
-                    try:
-                        instance_geometry = geom_obj.GetInstanceGeometry()
-                    except Exception:
-                        instance_geometry = None
-                    if instance_geometry is None:
-                        continue
-                    for sub_obj in instance_geometry:
-                        if isinstance(sub_obj, Solid) and sub_obj.Volume > 0:
-                            solids.append(sub_obj)
-
-        cache[key] = solids
-        return solids
-
-    def _clip_member_axis_to_roof(self, roof, start_point, end_point):
-        """Clip a member axis to the actual roof solid along its line of action."""
-        from Autodesk.Revit.DB import Line, SolidCurveIntersectionOptions
-
-        axis_dir = _normalize(end_point - start_point)
-        axis_len = _segment_length(start_point, end_point)
-        if axis_dir is None or axis_len < MIN_MEMBER_LENGTH:
-            return None
-
-        solids = self._get_roof_solids(roof)
-        if not solids:
-            return (start_point, end_point)
-
-        try:
-            bbox = roof.get_BoundingBox(None)
-        except Exception:
-            bbox = None
-
-        probe_half = axis_len + 10.0
-        if bbox is not None:
-            try:
-                dx = bbox.Max.X - bbox.Min.X
-                dy = bbox.Max.Y - bbox.Min.Y
-                dz = bbox.Max.Z - bbox.Min.Z
-                probe_half = max(probe_half, math.sqrt(dx * dx + dy * dy + dz * dz) + 10.0)
-            except Exception:
-                pass
-
-        mid_point = _midpoint(start_point, end_point)
-        probe_start = mid_point - axis_dir.Multiply(probe_half)
-        probe_end = mid_point + axis_dir.Multiply(probe_half)
-
-        try:
-            probe_line = Line.CreateBound(probe_start, probe_end)
-        except Exception:
-            return (start_point, end_point)
-
-        target_t = (mid_point - probe_start).DotProduct(axis_dir)
-        best_segment = None
-        best_contains_target = False
-        best_distance = None
-        best_length = 0.0
-
-        for solid in solids:
-            try:
-                result = solid.IntersectWithCurve(
-                    probe_line,
-                    SolidCurveIntersectionOptions(),
-                )
-                seg_count = result.SegmentCount
-            except Exception:
-                continue
-
-            for index in range(seg_count):
-                try:
-                    segment = result.GetCurveSegment(index)
-                    seg_start = segment.GetEndPoint(0)
-                    seg_end = segment.GetEndPoint(1)
-                except Exception:
-                    continue
-
-                start_t = (seg_start - probe_start).DotProduct(axis_dir)
-                end_t = (seg_end - probe_start).DotProduct(axis_dir)
-                seg_min = min(start_t, end_t)
-                seg_max = max(start_t, end_t)
-                contains_target = (seg_min - 1e-6) <= target_t <= (seg_max + 1e-6)
-                distance = 0.0 if contains_target else min(abs(target_t - seg_min), abs(target_t - seg_max))
-                seg_length = _segment_length(seg_start, seg_end)
-
-                choose = False
-                if best_segment is None:
-                    choose = True
-                elif contains_target and not best_contains_target:
-                    choose = True
-                elif contains_target == best_contains_target:
-                    if distance < (best_distance if best_distance is not None else float("inf")) - 1e-6:
-                        choose = True
-                    elif abs(distance - (best_distance if best_distance is not None else distance)) <= 1e-6 and seg_length > best_length:
-                        choose = True
-
-                if choose:
-                    if start_t <= end_t:
-                        best_segment = (seg_start, seg_end)
-                    else:
-                        best_segment = (seg_end, seg_start)
-                    best_contains_target = contains_target
-                    best_distance = distance
-                    best_length = seg_length
-
-        return best_segment
-
-    def _choose_best_side_shift(self, roof, start_point, end_point, side_axis, distance):
-        """Pick the side shift whose clipped axis stays farther inside the roof."""
-        if side_axis is None or distance <= 1e-9:
-            return None
-
-        original_length = _dist(start_point, end_point)
-        best_segment = None
-        best_length = -1.0
-        for sign in (-1.0, 1.0):
-            shift = side_axis.Multiply(sign * distance)
-            cand_start = start_point + shift
-            cand_end = end_point + shift
-            clipped = self._clip_member_axis_to_roof(roof, cand_start, cand_end)
-            if clipped is None:
-                continue
-            seg_length = _dist(clipped[0], clipped[1])
-            if seg_length > original_length + PROFILE_MATCH_TOL:
-                continue
-            if seg_length > best_length + 1e-6:
-                best_segment = clipped
-                best_length = seg_length
-
-        return best_segment
-
-    # ------------------------------------------------------------------
-    #  Collar ties
-    # ------------------------------------------------------------------
+    def _make_purlins(self, graph, roof_info, mode="stick"):
+        from Autodesk.Revit.DB import XYZ
+        members = []
+        
+        boundary_zs = []
+        for node in graph.nodes.values():
+            is_boundary = any(len(edge.faces) == 1 for edge in node.edges)
+            if is_boundary:
+                boundary_zs.append(node.pt.Z)
+        
+        Z_eave = min(boundary_zs) if boundary_zs else 0.0
+        
+        ridge_zs = []
+        for edge in graph.edges.values():
+            if edge.edge_type == "RIDGE":
+                ridge_zs.append(edge.node_a.pt.Z)
+                ridge_zs.append(edge.node_b.pt.Z)
+                
+        Z_ridge = max(ridge_zs) if ridge_zs else Z_eave + 8.0
+        
+        if graph.faces:
+            theta = math.acos(max(0.1, min(1.0, graph.faces[0].normal.Z)))
+        else:
+            theta = math.pi / 6.0
+            
+        slope_spacing = 4.0
+        vert_spacing = slope_spacing * math.sin(theta)
+        if vert_spacing < 0.5:
+            vert_spacing = 2.0
+            
+        purlin_family = self.config.stud_family_name
+        purlin_type = self.config.stud_type_name
+        purlin_width, purlin_depth = self._resolve_roof_member_size(purlin_family, purlin_type)
+        if purlin_width is None or purlin_width <= 0.0:
+            purlin_width = 1.5 / 12.0
+        if purlin_depth is None or purlin_depth <= 0.0:
+            purlin_depth = 3.5 / 12.0
+            
+        rafter_family = self.config.stud_family_name
+        rafter_type = self.config.stud_type_name
+        _, rafter_depth = self._resolve_roof_member_size(rafter_family, rafter_type)
+        if rafter_depth is None or rafter_depth <= 0.0:
+            rafter_depth = 5.5 / 12.0
+            
+        Z_curr = Z_eave + vert_spacing
+        while Z_curr < Z_ridge - 0.5:
+            for face in graph.faces:
+                intersections = []
+                for edge in face.edges:
+                    z_min = min(edge.node_a.pt.Z, edge.node_b.pt.Z)
+                    z_max = max(edge.node_a.pt.Z, edge.node_b.pt.Z)
+                    if z_min <= Z_curr <= z_max:
+                        dz = edge.node_b.pt.Z - edge.node_a.pt.Z
+                        if abs(dz) > 1e-4:
+                            t = (Z_curr - edge.node_a.pt.Z) / dz
+                            pt = edge.node_a.pt + (edge.node_b.pt - edge.node_a.pt).Multiply(t)
+                        else:
+                            pt = _midpoint(edge.node_a.pt, edge.node_b.pt)
+                        intersections.append(pt)
+                
+                unique_ints = []
+                for pt in intersections:
+                    if not any(_dist(pt, x) < 0.1 for x in unique_ints):
+                        unique_ints.append(pt)
+                        
+                if len(unique_ints) >= 2:
+                    sorted_ints = sorted(unique_ints, key=lambda p: (p - face.plane_info.origin).DotProduct(face.plane_info.x_axis))
+                    for idx in range(0, len(sorted_ints) - 1, 2):
+                        pt_a = sorted_ints[idx]
+                        pt_b = sorted_ints[idx+1]
+                        
+                        if _dist(pt_a, pt_b) < MIN_MEMBER_LENGTH:
+                            continue
+                            
+                        layer_depth = self._resolve_roof_layer_top_depth(face.plane_info)
+                        if mode == "stick":
+                            shift_dist = layer_depth + rafter_depth + purlin_depth / 2.0
+                        else:
+                            shift_dist = layer_depth + purlin_depth / 2.0
+                            
+                        shift = face.normal.Multiply(shift_dist)
+                        
+                        m = FramingMember(FramingMember.HEADER, pt_a - shift, pt_b - shift)
+                        m.member_type = "PURLIN"
+                        m.family_name = purlin_family
+                        m.type_name = purlin_type
+                        
+                        m.rotation = _rotation_from_up(pt_b - pt_a, face.normal)
+                        m.disallow_end_joins = True
+                        m.host_kind = face.plane_info.kind
+                        m.host_id = face.plane_info.element_id
+                        members.append(m)
+                        
+            Z_curr += vert_spacing
+            
+        return members
 
     def _make_collar_ties(self, planes, ridge_edges, roof_info):
         """Collar ties at 1/3 rafter length from ridge, every other rafter."""
@@ -1721,16 +1338,8 @@ class RoofFramingEngine(BaseFramingEngine):
 
         return members
 
-    # ------------------------------------------------------------------
-    #  Ceiling joists + kickers
-    # ------------------------------------------------------------------
-
     def _make_ceiling_joists(self, planes, ridge_edges, roof_info, spacing, include_kickers=True):
-        """Ceiling joists spanning eave-to-eave at plate line elevation.
-
-        Also generates kicker/outrigger braces from each joist up to
-        the rafter at KICKER_FRACTION of rafter length from eave.
-        """
+        """Ceiling joists spanning eave-to-eave at plate line elevation."""
         from Autodesk.Revit.DB import XYZ
 
         members = []
@@ -1764,7 +1373,6 @@ class RoofFramingEngine(BaseFramingEngine):
                     d += spacing
                     continue
 
-                # Use lower support point to avoid floating joists on uneven eaves.
                 joist_z = min(foot_a.Z, foot_b.Z)
                 joist_a = XYZ(foot_a.X, foot_a.Y, joist_z)
                 joist_b = XYZ(foot_b.X, foot_b.Y, joist_z)
@@ -1784,7 +1392,6 @@ class RoofFramingEngine(BaseFramingEngine):
                         members.append(m)
 
                     if include_kickers:
-                        # Kicker side A: diagonal from joist to rafter.
                         rafter_pt_a = _lerp(foot_a, ridge_pt, KICKER_FRACTION)
                         kick_base_a = _lerp(joist_a, joist_b, KICKER_FRACTION)
                         if _dist(kick_base_a, rafter_pt_a) >= MIN_MEMBER_LENGTH:
@@ -1808,7 +1415,6 @@ class RoofFramingEngine(BaseFramingEngine):
                                 km.host_id = roof_info.element_id
                                 members.append(km)
 
-                        # Kicker side B.
                         rafter_pt_b = _lerp(foot_b, ridge_pt, KICKER_FRACTION)
                         kick_base_b = _lerp(joist_b, joist_a, KICKER_FRACTION)
                         if _dist(kick_base_b, rafter_pt_b) >= MIN_MEMBER_LENGTH:
@@ -1836,10 +1442,6 @@ class RoofFramingEngine(BaseFramingEngine):
 
         return members
 
-    # ------------------------------------------------------------------
-    #  Fascia / border trim
-    # ------------------------------------------------------------------
-
     def _make_fascia(self, eave_edges, roof_info):
         """Create border trim members along the supplied roof boundary edges."""
         members = []
@@ -1864,10 +1466,6 @@ class RoofFramingEngine(BaseFramingEngine):
             if member is not None:
                 members.append(member)
         return members
-
-    # ------------------------------------------------------------------
-    #  Ledger -- high-side beam on shed roofs
-    # ------------------------------------------------------------------
 
     def _make_ledger(self, ledger_edges, roof_info):
         """Ledger / header beam at the high side of a shed roof."""
@@ -1990,6 +1588,23 @@ class RoofFramingEngine(BaseFramingEngine):
         member.host_id = roof_info.element_id
         return member
 
+    def _choose_best_side_shift(self, roof, start_point, end_point, side_axis, shift_distance):
+        """Choose side shift direction that keeps the member inside the roof envelope."""
+        shift_a = side_axis.Multiply(shift_distance)
+        shift_b = side_axis.Multiply(-shift_distance)
+
+        c_a = self._clip_member_axis_to_roof(roof, start_point + shift_a, end_point + shift_a)
+        c_b = self._clip_member_axis_to_roof(roof, start_point + shift_b, end_point + shift_b)
+
+        len_a = _dist(c_a[0], c_a[1]) if c_a else 0.0
+        len_b = _dist(c_b[0], c_b[1]) if c_b else 0.0
+
+        if len_a >= len_b and len_a >= MIN_MEMBER_LENGTH:
+            return start_point + shift_a, end_point + shift_a
+        elif len_b >= MIN_MEMBER_LENGTH:
+            return start_point + shift_b, end_point + shift_b
+        return None
+
     @staticmethod
     def _edge_depth_from_roof_face(plane, start_point, end_point, fallback_depth):
         """Return average edge depth from the roof exterior face."""
@@ -2067,10 +1682,6 @@ class RoofFramingEngine(BaseFramingEngine):
 
         return PLATE_THICKNESS, 0.0
 
-    # ------------------------------------------------------------------
-    #  Truss placement
-    # ------------------------------------------------------------------
-
     def _get_support_elements(self, roof_info):
         from Autodesk.Revit.DB import FilteredElementCollector, Wall, BuiltInCategory, Outline, BoundingBoxIntersectsFilter, XYZ
         doc = self.doc
@@ -2079,7 +1690,6 @@ class RoofFramingEngine(BaseFramingEngine):
         if bbox is None:
             return [], []
         
-        # Expand Outline vertically and horizontally to find walls/beams directly below
         outline = Outline(
             XYZ(bbox.Min.X - 2.0, bbox.Min.Y - 2.0, bbox.Min.Z - 12.0),
             XYZ(bbox.Max.X + 2.0, bbox.Max.Y + 2.0, bbox.Max.Z + 2.0)
@@ -2168,209 +1778,280 @@ class RoofFramingEngine(BaseFramingEngine):
             dot = D.DotProduct(N)
             if abs(dot) > 1e-5:
                 shorten_len = (support_width / 2.0) / abs(dot)
-                # Ensure we don't shorten more than the member length
                 member_len = (p_end - p_start).GetLength()
                 if shorten_len < member_len - 0.1:
                     return p_int - D.Multiply(shorten_len)
         return p_end
 
+    def _clip_member_axis_to_roof(self, roof, start_point, end_point):
+        """Clip a member axis to the actual roof solid along its line of action."""
+        from Autodesk.Revit.DB import Line, SolidCurveIntersectionOptions
+
+        axis_dir = _normalize(end_point - start_point)
+        axis_len = _segment_length(start_point, end_point)
+        if axis_dir is None or axis_len < MIN_MEMBER_LENGTH:
+            return None
+
+        solids = self._get_roof_solids(roof)
+        if not solids:
+            return (start_point, end_point)
+
+        try:
+            bbox = roof.get_BoundingBox(None)
+        except Exception:
+            bbox = None
+
+        probe_half = axis_len + 10.0
+        if bbox is not None:
+            try:
+                dx = bbox.Max.X - bbox.Min.X
+                dy = bbox.Max.Y - bbox.Min.Y
+                dz = bbox.Max.Z - bbox.Min.Z
+                probe_half = max(probe_half, math.sqrt(dx * dx + dy * dy + dz * dz) + 10.0)
+            except Exception:
+                pass
+
+        mid_point = _midpoint(start_point, end_point)
+        probe_start = mid_point - axis_dir.Multiply(probe_half)
+        probe_end = mid_point + axis_dir.Multiply(probe_half)
+
+        try:
+            probe_line = Line.CreateBound(probe_start, probe_end)
+        except Exception:
+            return (start_point, end_point)
+
+        target_t = (mid_point - probe_start).DotProduct(axis_dir)
+        best_segment = None
+        best_contains_target = False
+        best_distance = None
+        best_length = 0.0
+
+        for solid in solids:
+            try:
+                result = solid.IntersectWithCurve(
+                    probe_line,
+                    SolidCurveIntersectionOptions(),
+                )
+                seg_count = result.SegmentCount
+            except Exception:
+                continue
+
+            for index in range(seg_count):
+                try:
+                    segment = result.GetCurveSegment(index)
+                    seg_start = segment.GetEndPoint(0)
+                    seg_end = segment.GetEndPoint(1)
+                except Exception:
+                    continue
+
+                t0 = (seg_start - probe_start).DotProduct(axis_dir)
+                t1 = (seg_end - probe_start).DotProduct(axis_dir)
+                t_min = min(t0, t1)
+                t_max = max(t0, t1)
+                contains_target = (t_min - 1e-3) <= target_t <= (t_max + 1e-3)
+                seg_length = abs(t_max - t_min)
+
+                if contains_target:
+                    clipped_start = probe_start + axis_dir.Multiply(max(target_t - axis_len / 2.0, t_min))
+                    clipped_end = probe_start + axis_dir.Multiply(min(target_t + axis_len / 2.0, t_max))
+                    clipped = (clipped_start, clipped_end)
+                    dist = abs(t_min - (target_t - axis_len / 2.0)) + abs((target_t + axis_len / 2.0) - t_max)
+                    if not best_contains_target or dist < best_distance:
+                        best_segment = clipped
+                        best_contains_target = True
+                        best_distance = dist
+                elif not best_contains_target:
+                    clipped_start = probe_start + axis_dir.Multiply(max(target_t - axis_len / 2.0, t_min))
+                    clipped_end = probe_start + axis_dir.Multiply(min(target_t + axis_len / 2.0, t_max))
+                    clipped = (clipped_start, clipped_end)
+                    if seg_length > best_length:
+                        best_segment = clipped
+                        best_length = seg_length
+
+        return best_segment
+
+    def _get_roof_solids(self, roof):
+        """Return cached positive-volume solids for a roof element."""
+        from Autodesk.Revit.DB import GeometryInstance, Options, Solid, ViewDetailLevel
+
+        cache = getattr(self, "_roof_solids_cache", None)
+        if cache is None:
+            cache = {}
+            self._roof_solids_cache = cache
+
+        key = getattr(getattr(roof, "Id", None), "IntegerValue", None)
+        if key in cache:
+            return cache[key]
+
+        solids = []
+        try:
+            options = Options()
+            options.ComputeReferences = False
+            options.DetailLevel = ViewDetailLevel.Fine
+            geometry = roof.get_Geometry(options)
+        except Exception:
+            geometry = None
+
+        if geometry is not None:
+            for geom_obj in geometry:
+                if isinstance(geom_obj, Solid) and geom_obj.Volume > 0:
+                    solids.append(geom_obj)
+                    continue
+                if isinstance(geom_obj, GeometryInstance):
+                    try:
+                        instance_geometry = geom_obj.GetInstanceGeometry()
+                    except Exception:
+                        instance_geometry = None
+                    if instance_geometry is None:
+                        continue
+                    for sub_obj in instance_geometry:
+                        if isinstance(sub_obj, Solid) and sub_obj.Volume > 0:
+                            solids.append(sub_obj)
+
+        cache[key] = solids
+        return solids
+
     def _calc_truss_positions(self, roof_info):
-        """Place trusses at OC spacing based on precise 3D boundary slicing."""
         from Autodesk.Revit.DB import XYZ
         import math
-
         members = []
         planes = roof_info.planes
         
         truss_spacing_in = getattr(self.config, 'truss_spacing', 24.0)
-        ceiling_spacing_in = getattr(self.config, 'ceiling_spacing', 16.0)
         truss_spacing = truss_spacing_in / 12.0
-        ceiling_spacing = ceiling_spacing_in / 12.0
         
         family_top = getattr(self.config, 'family_top_chords', (self.config.stud_family_name, self.config.stud_type_name))
         family_bottom = getattr(self.config, 'family_bottom_chords', (self.config.stud_family_name, self.config.stud_type_name))
         family_web = getattr(self.config, 'family_web_bracing', (self.config.stud_family_name, self.config.stud_type_name))
-        family_edge = getattr(self.config, 'family_hips_ridges', (self.config.stud_family_name, self.config.stud_type_name))
-
+        
         _, tc_depth = self._resolve_roof_member_size(family_top[0], family_top[1])
         _, bc_depth = self._resolve_roof_member_size(family_bottom[0], family_bottom[1])
         _, web_depth = self._resolve_roof_member_size(family_web[0], family_web[1])
-
+        if tc_depth is None or tc_depth <= 0.0:
+            tc_depth = 5.5 / 12.0
+        if bc_depth is None or bc_depth <= 0.0:
+            bc_depth = 5.5 / 12.0
+        if web_depth is None or web_depth <= 0.0:
+            web_depth = 3.5 / 12.0
+            
         walls, beams = self._get_support_elements(roof_info)
-
-        try:
-            ridge_edges = _find_ridge_edges(planes)
-        except Exception:
-            ridge_edges = []
-
-        horizontal_ridges = []
-        for edge in ridge_edges:
-            rs_edge, re_edge, pa_edge, pb_edge = edge
-            if pa_edge.normal.DotProduct(pb_edge.normal) > 0.5:
-                continue
-            if abs(re_edge.Z - rs_edge.Z) < RIDGE_TOL:
-                horizontal_ridges.append(edge)
-
-        if ridge_edges and not horizontal_ridges:
-            horizontal_ridges = ridge_edges
-            
-        sloped = [p for p in planes if p.normal.Z < FLAT_THRESHOLD]
         
-        slice_planes = []
-
-        seen_t = set()
-        for rs, re, pa, pb in horizontal_ridges:
-            ridge_dir = re - rs
-            ridge_len = ridge_dir.GetLength()
-            if ridge_len < MIN_MEMBER_LENGTH:
-                continue
-            ridge_unit = ridge_dir.Multiply(1.0 / ridge_len)
+        # 1. Build and solve topology graph
+        graph = RoofTopologyGraph(planes)
+        graph.solve_geometry()
+        graph.classify_edges()
+        
+        for face in graph.faces:
+            layer_depth = self._resolve_roof_layer_top_depth(face.plane_info)
+            face.d_shifted = face.d + layer_depth + tc_depth / 2.0
             
-            U_x = XYZ(-ridge_unit.Y, ridge_unit.X, 0.0).Normalize()
+        # 2. Establish global truss direction
+        eave_edges = [edge for edge in graph.edges.values() if edge.edge_type == "EAVE"]
+        if not eave_edges:
+            eave_edges = [edge for edge in graph.edges.values() if len(edge.faces) == 1]
             
-            min_d, max_d = 0.0, ridge_len
-            proj_vals = []
-            for plane in planes:
-                if plane.normal.Z >= FLAT_THRESHOLD:
-                    continue
-                for loop in plane.boundary_loops_local:
-                    for vertex in loop:
-                        pt = _surface_point(plane, vertex[0], vertex[1])
-                        proj = (pt - rs).DotProduct(ridge_unit)
-                        proj_vals.append(proj)
-                        
-            if proj_vals:
-                min_d = min(proj_vals)
-                max_d = max(proj_vals)
-                
-            span_len = max_d - min_d
-            num_trusses = int(math.ceil(span_len / truss_spacing)) if truss_spacing > 0 else 1
-            num_trusses = max(1, num_trusses)
-            actual_truss_spacing = span_len / num_trusses
+        if eave_edges:
+            longest_eave = max(eave_edges, key=lambda e: _dist(e.node_a.pt, e.node_b.pt))
+            eave_dir = _normalize(longest_eave.node_b.pt - longest_eave.node_a.pt)
+        else:
+            eave_dir = XYZ(1, 0, 0)
             
-            for i in range(num_trusses + 1):
-                d_station = min_d + i * actual_truss_spacing
-                ridge_pt = rs + ridge_unit.Multiply(d_station)
-                
-                rounded_station = round(d_station, 2)
-                if rounded_station in seen_t:
-                    continue
-                seen_t.add(rounded_station)
-                
-                slice_planes.append({
-                    "origin": ridge_pt,
-                    "U_x": U_x,
-                    "type": "MAIN",
-                    "plane": None
-                })
-
-        for p in sloped:
-            downslope = XYZ(p.normal.X, p.normal.Y, 0.0).Normalize()
-            is_main = False
-            for rs, re, pa, pb in horizontal_ridges:
-                ridge_dir = (re - rs).Normalize()
-                U_x_main = XYZ(-ridge_dir.Y, ridge_dir.X, 0.0).Normalize()
-                if abs(downslope.DotProduct(U_x_main)) > 0.99:
-                    is_main = True
-                    break
+        truss_dir = XYZ(-eave_dir.Y, eave_dir.X, 0.0).Normalize()
+        slice_normal = eave_dir
+        
+        proj_vals = [node.pt.DotProduct(slice_normal) for node in graph.nodes.values()]
+        if not proj_vals:
+            return members
+        t_min = min(proj_vals)
+        t_max = max(proj_vals)
+        
+        span_len = t_max - t_min
+        num_trusses = int(math.ceil(span_len / truss_spacing)) if truss_spacing > 0 else 1
+        num_trusses = max(1, num_trusses)
+        actual_truss_spacing = span_len / num_trusses
+        
+        # 3. Step through stations
+        for i in range(num_trusses + 1):
+            t_station = t_min + i * actual_truss_spacing
+            slice_origin = slice_normal.Multiply(t_station)
             
-            if not is_main:
-                cross_slope = XYZ(-downslope.Y, downslope.X, 0.0).Normalize()
-                proj_vals = []
-                for loop in p.boundary_loops_local:
-                    for vertex in loop:
-                        pt = _surface_point(p, vertex[0], vertex[1])
-                        proj_vals.append(pt.DotProduct(cross_slope))
-                        
-                if proj_vals:
-                    min_c = min(proj_vals)
-                    max_c = max(proj_vals)
-                    span_c = max_c - min_c
-                    num_jacks = int(math.ceil(span_c / truss_spacing)) if truss_spacing > 0 else 1
-                    actual_spacing = span_c / num_jacks
+            intersections = []
+            for edge in graph.edges.values():
+                d_a = (edge.node_a.pt - slice_origin).DotProduct(slice_normal)
+                d_b = (edge.node_b.pt - slice_origin).DotProduct(slice_normal)
+                if d_a * d_b < 0:
+                    t_int = d_a / (d_a - d_b)
+                    pt = edge.node_a.pt + (edge.node_b.pt - edge.node_a.pt).Multiply(t_int)
+                    intersections.append((pt, edge))
+                elif abs(d_a) < 1e-4:
+                    intersections.append((edge.node_a.pt, edge))
+                elif abs(d_b) < 1e-4:
+                    intersections.append((edge.node_b.pt, edge))
                     
-                    for i in range(1, num_jacks):
-                        c_val = min_c + i * actual_spacing
-                        origin = cross_slope.Multiply(c_val)
-                        slice_planes.append({
-                            "origin": origin,
-                            "U_x": downslope,
-                            "type": "HIP_JACK",
-                            "plane": p
-                        })
-
-        for s_plane in slice_planes:
-            Origin = s_plane["origin"]
-            U_x = s_plane["U_x"]
-            N = U_x.CrossProduct(XYZ.BasisZ).Normalize()
+            unique_ints = []
+            seen_u = set()
+            for pt, edge in intersections:
+                u_val = (pt - slice_origin).DotProduct(truss_dir)
+                rounded_u = round(u_val, 3)
+                if rounded_u not in seen_u:
+                    seen_u.add(rounded_u)
+                    unique_ints.append((pt, edge, u_val))
+                    
+            if len(unique_ints) < 2:
+                continue
+                
+            unique_ints.sort(key=lambda item: item[2])
             
             segments = []
-            for p in sloped:
-                if s_plane["type"] == "HIP_JACK" and p != s_plane["plane"]:
+            for idx in range(len(unique_ints) - 1):
+                pt_a, edge_a, u_a = unique_ints[idx]
+                pt_b, edge_b, u_b = unique_ints[idx+1]
+                if u_b - u_a < MIN_MEMBER_LENGTH:
                     continue
-                
-                intersections = []
-                for loop in p.boundary_loops_local:
-                    pts3d = [_surface_point(p, v[0], v[1]) for v in loop]
-                    for i in range(len(pts3d)):
-                        V1 = pts3d[i]
-                        V2 = pts3d[(i+1)%len(pts3d)]
-                        d1 = (V1 - Origin).DotProduct(N)
-                        d2 = (V2 - Origin).DotProduct(N)
-                        
-                        if d1 * d2 < 0:
-                            t = d1 / (d1 - d2)
-                            P_int = V1 + (V2 - V1).Multiply(t)
-                            x_val = (P_int - Origin).DotProduct(U_x)
-                            intersections.append(x_val)
-                        elif abs(d1) < 1e-5:
-                            intersections.append((V1 - Origin).DotProduct(U_x))
-                
-                if len(intersections) >= 2:
-                    x_min = min(intersections)
-                    x_max = max(intersections)
-                    if x_max - x_min < MIN_MEMBER_LENGTH:
-                        continue
-                        
-                    layer_depth = self._resolve_roof_layer_top_depth(p)
-                    p_ref_shifted = _surface_point(p, 0, 0) - p.normal.Multiply(layer_depth + tc_depth / 2.0)
                     
-                    denom = p.normal.Z
+                face = None
+                face_intersection = edge_a.faces.intersection(edge_b.faces)
+                if face_intersection:
+                    face = list(face_intersection)[0]
+                else:
+                    combined = list(edge_a.faces) + list(edge_b.faces)
+                    if combined:
+                        face = combined[0]
+                        
+                if face is not None:
+                    denom = face.normal.Z
                     if abs(denom) > 1e-5:
-                        A = - U_x.DotProduct(p.normal) / denom
-                        B = - (Origin - p_ref_shifted).DotProduct(p.normal) / denom
+                        A = - truss_dir.DotProduct(face.normal) / denom
+                        B = - (slice_origin).DotProduct(face.normal) / denom - face.d_shifted / denom
                         segments.append({
-                            "x_min": x_min,
-                            "x_max": x_max,
+                            "x_min": u_a,
+                            "x_max": u_b,
                             "A": A,
                             "B": B,
-                            "plane": p
+                            "face": face
                         })
-            
+                        
             if not segments:
                 continue
                 
-            global_min_x = min(s["x_min"] for s in segments)
-            global_max_x = max(s["x_max"] for s in segments)
+            p_start_3d = slice_origin + truss_dir.Multiply(segments[0]["x_min"])
+            p_end_3d = slice_origin + truss_dir.Multiply(segments[-1]["x_max"])
             
-            p_start_3d = Origin + U_x.Multiply(global_min_x)
-            p_end_3d = Origin + U_x.Multiply(global_max_x)
-            
-            # Find the lowest Z height along all top chord segments
             lowest_roof_z = 1e9
             for s in segments:
                 lowest_roof_z = min(lowest_roof_z, s["A"] * s["x_min"] + s["B"])
                 lowest_roof_z = min(lowest_roof_z, s["A"] * s["x_max"] + s["B"])
+                
+            intersections_support = self._find_supports_along_slice(p_start_3d, p_end_3d, walls, beams)
+            valid_zs = [pt.Z for pt in intersections_support if pt.Z < lowest_roof_z - 0.1]
+            joist_z = min(valid_zs) if valid_zs else lowest_roof_z - 1.5
             
-            intersections = self._find_supports_along_slice(p_start_3d, p_end_3d, walls, beams)
-            valid_zs = [pt.Z for pt in intersections if pt.Z < lowest_roof_z - 0.1]
-            joist_z = min(valid_zs) if valid_zs else lowest_roof_z - 1.0
+            y_bc = joist_z + bc_depth / 2.0
             
             x_events = set()
             for s in segments:
                 x_events.add(round(s["x_min"], 4))
                 x_events.add(round(s["x_max"], 4))
-            
             for i in range(len(segments)):
                 for j in range(i+1, len(segments)):
                     s1 = segments[i]
@@ -2384,16 +2065,16 @@ class RoofFramingEngine(BaseFramingEngine):
             
             profile_nodes = []
             for x_val in x_events:
-                best_z = -1e9
-                best_plane = None
+                best_v = -1e9
+                best_face = None
                 for s in segments:
                     if s["x_min"] - 1e-3 <= x_val <= s["x_max"] + 1e-3:
-                        z_val = s["A"] * x_val + s["B"]
-                        if z_val > best_z:
-                            best_z = z_val
-                            best_plane = s["plane"]
-                if best_z > -1e8:
-                    profile_nodes.append({"x": x_val, "z": best_z, "plane": best_plane})
+                        v_val = s["A"] * x_val + s["B"]
+                        if v_val > best_v:
+                            best_v = v_val
+                            best_face = s["face"]
+                if best_v > -1e8:
+                    profile_nodes.append({"x": x_val, "z": best_v, "face": best_face})
                     
             if len(profile_nodes) < 2:
                 continue
@@ -2418,24 +2099,21 @@ class RoofFramingEngine(BaseFramingEngine):
             for i in range(len(filtered_nodes)-1):
                 n1 = filtered_nodes[i]
                 n2 = filtered_nodes[i+1]
-                pt1 = Origin + U_x.Multiply(n1["x"]) + XYZ.BasisZ.Multiply(n1["z"])
-                pt2 = Origin + U_x.Multiply(n2["x"]) + XYZ.BasisZ.Multiply(n2["z"])
+                pt1 = slice_origin + truss_dir.Multiply(n1["x"]) + XYZ.BasisZ.Multiply(n1["z"])
+                pt2 = slice_origin + truss_dir.Multiply(n2["x"]) + XYZ.BasisZ.Multiply(n2["z"])
                 if (pt2 - pt1).GetLength() < MIN_MEMBER_LENGTH:
                     continue
-                
+                    
                 m_tc = FramingMember(FramingMember.STUD, pt1, pt2)
                 m_tc.member_type = "TOP_CHORD"
                 m_tc.family_name = family_top[0]
                 m_tc.type_name = family_top[1]
-                m_tc.rotation = _rotation_from_up(pt2 - pt1, n1["plane"].normal)
+                m_tc.rotation = _rotation_from_up(pt2 - pt1, n1["face"].normal)
                 m_tc.host_kind = roof_info.kind
                 m_tc.host_id = roof_info.element_id
                 m_tc.disallow_end_joins = True
                 members.append(m_tc)
                 
-            y_bc = joist_z + bc_depth / 2.0
-            
-            # Find the interval where the top chord profile is above y_bc
             candidate_xs = []
             for n in filtered_nodes:
                 if n["z"] >= y_bc - 1e-5:
@@ -2459,8 +2137,8 @@ class RoofFramingEngine(BaseFramingEngine):
             if abs(heel_x_R - heel_x_L) < MIN_MEMBER_LENGTH:
                 continue
                 
-            p_bc_start = Origin + U_x.Multiply(heel_x_L) + XYZ.BasisZ.Multiply(y_bc)
-            p_bc_end = Origin + U_x.Multiply(heel_x_R) + XYZ.BasisZ.Multiply(y_bc)
+            p_bc_start = slice_origin + truss_dir.Multiply(heel_x_L) + XYZ.BasisZ.Multiply(y_bc)
+            p_bc_end = slice_origin + truss_dir.Multiply(heel_x_R) + XYZ.BasisZ.Multiply(y_bc)
             
             m_bc = FramingMember(FramingMember.STUD, p_bc_start, p_bc_end)
             m_bc.member_type = "BOTTOM_CHORD"
@@ -2472,7 +2150,6 @@ class RoofFramingEngine(BaseFramingEngine):
             m_bc.disallow_end_joins = True
             members.append(m_bc)
             
-            # Calculate highest node for the king post
             highest_node = max(filtered_nodes, key=lambda n: n["z"])
             king_x = highest_node["x"]
             
@@ -2483,17 +2160,14 @@ class RoofFramingEngine(BaseFramingEngine):
                 
             web_x_vals = []
             
-            # Left of king post
             curr_x = king_x - web_spacing
             while curr_x > heel_x_L + 0.5:
                 web_x_vals.append(curr_x)
                 curr_x -= web_spacing
                 
-            # King post
             if heel_x_L - 1e-3 <= king_x <= heel_x_R + 1e-3:
                 web_x_vals.append(king_x)
                 
-            # Right of king post
             curr_x = king_x + web_spacing
             while curr_x < heel_x_R - 0.5:
                 web_x_vals.append(curr_x)
@@ -2506,10 +2180,10 @@ class RoofFramingEngine(BaseFramingEngine):
                         z_val = s["A"] * w_x + s["B"]
                         if z_val > best_z:
                             best_z = z_val
-                
+                            
                 if best_z > y_bc + MIN_MEMBER_LENGTH:
-                    pt_top = Origin + U_x.Multiply(w_x) + XYZ.BasisZ.Multiply(best_z)
-                    pt_bot = Origin + U_x.Multiply(w_x) + XYZ.BasisZ.Multiply(y_bc)
+                    pt_top = slice_origin + truss_dir.Multiply(w_x) + XYZ.BasisZ.Multiply(best_z)
+                    pt_bot = slice_origin + truss_dir.Multiply(w_x) + XYZ.BasisZ.Multiply(y_bc)
                     m_web = FramingMember(FramingMember.STUD, pt_bot, pt_top)
                     m_web.member_type = "WEB_BRACING"
                     m_web.family_name = family_web[0]
@@ -2519,10 +2193,11 @@ class RoofFramingEngine(BaseFramingEngine):
                     m_web.host_id = roof_info.element_id
                     m_web.disallow_end_joins = True
                     members.append(m_web)
-
+                    
+        # 4. Generate continuous horizontal purlins on top of trusses!
         try:
-            members.extend(self._make_ridge_boards(ridge_edges, roof_info))
+            members.extend(self._make_purlins(graph, roof_info, mode="truss"))
         except Exception:
             pass
-
+            
         return members
