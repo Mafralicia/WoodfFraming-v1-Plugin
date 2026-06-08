@@ -314,11 +314,6 @@ def _classify_shared_edge(rs, re, pa, pb):
 
 def _get_non_ridge_edges(plane, ridge_edges):
     """Return all boundary edges of a plane that are NOT ridge edges."""
-    ridge_set = set()
-    for rs, re, pa, pb in ridge_edges:
-        ridge_set.add((_pt_key(rs), _pt_key(re)))
-        ridge_set.add((_pt_key(re), _pt_key(rs)))
-
     edges = []
     for loop in plane.boundary_loops_local:
         count = len(loop)
@@ -327,9 +322,14 @@ def _get_non_ridge_edges(plane, ridge_edges):
             e_local = loop[(i + 1) % count]
             s_world = _surface_point(plane, s_local[0], s_local[1])
             e_world = _surface_point(plane, e_local[0], e_local[1])
-            sk = _pt_key(s_world)
-            ek = _pt_key(e_world)
-            if (sk, ek) not in ridge_set:
+            
+            is_ridge = False
+            for rs, re, pa, pb in ridge_edges:
+                if ((_dist(s_world, rs) < 1.5 and _dist(e_world, re) < 1.5) or
+                    (_dist(s_world, re) < 1.5 and _dist(e_world, rs) < 1.5)):
+                    is_ridge = True
+                    break
+            if not is_ridge:
                 edges.append((s_world, e_world))
     return edges
 
@@ -675,34 +675,12 @@ class RoofTopologyGraph(object):
         return edge
 
     def solve_geometry(self):
-        # 1. Determine eave height(s)
-        boundary_zs = []
-        for node in self.nodes.values():
-            is_boundary = any(len(edge.faces) == 1 for edge in node.edges)
-            if is_boundary:
-                boundary_zs.append(node.pt.Z)
-        
-        Z_eave = min(boundary_zs) if boundary_zs else 0.0
-        
-        # 2. Solve each node
+        # Solve each node
         solved_pts = {}
         for key, node in self.nodes.items():
             planes = []
             for face in node.faces:
                 planes.append((face.normal, face.d))
-                
-            # Check if near eave Z
-            is_eave_node = False
-            for edge in node.edges:
-                if len(edge.faces) == 1:
-                    z_avg = (edge.node_a.pt.Z + edge.node_b.pt.Z) / 2.0
-                    if abs(z_avg - Z_eave) < 1.0:
-                        is_eave_node = True
-                        break
-            
-            if is_eave_node or abs(node.pt.Z - Z_eave) < 0.2:
-                from Autodesk.Revit.DB import XYZ
-                planes.append((XYZ(0, 0, 1), -Z_eave))
                 
             solved_pt = None
             if len(planes) >= 3:
@@ -781,13 +759,15 @@ class RoofTopologyGraph(object):
                 
                 if t_a.Z > 0.01 or t_b.Z > 0.01:
                     edge.edge_type = "VALLEY"
-                elif z_diff < 0.15:
+                elif (z_diff / edge_len) < 0.15 or z_diff < 0.25:
                     edge.edge_type = "RIDGE"
                 else:
                     edge.edge_type = "HIP"
             else:
                 z_diff = abs(edge.node_a.pt.Z - edge.node_b.pt.Z)
-                if z_diff < 0.15:
+                edge_len = (edge.node_b.pt - edge.node_a.pt).GetLength()
+                edge_slope = (z_diff / edge_len) if edge_len > 1e-4 else 0.0
+                if edge_slope < 0.15 or z_diff < 0.25:
                     edge.edge_type = "EAVE"
                 else:
                     edge.edge_type = "RAKE"
