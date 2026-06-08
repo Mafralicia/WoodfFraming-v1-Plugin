@@ -836,6 +836,13 @@ class RoofFramingEngine(BaseFramingEngine):
             output = script.get_output()
             output.print_md("### Debug place_members in wf_roof:")
             output.print_md("- **Total members to place:** {}".format(len(members)))
+            
+            mtype_counts = {}
+            for m in members:
+                mtype = getattr(m, "member_type", "UNKNOWN")
+                mtype_counts[mtype] = mtype_counts.get(mtype, 0) + 1
+            output.print_md("- **Member type counts to place:** {}".format(mtype_counts))
+
             for m in members:
                 if m.member_type in ("RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER"):
                     output.print_md("  - **To Place {}**: Start=({:.3f}, {:.3f}, {:.3f}), End=({:.3f}, {:.3f}, {:.3f}), Family={}, Type={}".format(
@@ -1062,6 +1069,12 @@ class RoofFramingEngine(BaseFramingEngine):
                 m.host_id = roof_info.element_id
                 members.append(m)
                 
+        try:
+            from pyrevit import script
+            script.get_output().print_md("- **Stick Frame: Ridge boards calculated:** {}".format(len(members)))
+        except Exception:
+            pass
+
         # 4. Place Hip and Valley Rafters
         for edge in graph.edges.values():
             if edge.edge_type in ("HIP", "VALLEY"):
@@ -1090,6 +1103,12 @@ class RoofFramingEngine(BaseFramingEngine):
                 m.host_id = roof_info.element_id
                 members.append(m)
                 
+        try:
+            from pyrevit import script
+            script.get_output().print_md("- **Stick Frame: Ridge + Hip/Valley rafters calculated:** {}".format(len(members)))
+        except Exception:
+            pass
+
         # 5. Place Common and Jack Rafters
         for face in graph.faces:
             local_loops = []
