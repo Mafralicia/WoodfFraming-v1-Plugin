@@ -1840,7 +1840,7 @@ class RoofFramingEngine(BaseFramingEngine):
         t = ((support_start.X - p_start.X) * dy2 - (support_start.Y - p_start.Y) * dx2) / denom
         u = ((support_start.X - p_start.X) * dy1 - (support_start.Y - p_start.Y) * dx1) / denom
         
-        if -0.05 <= u <= 1.05 and -0.05 <= t <= 1.05:
+        if -0.15 <= u <= 1.15 and -0.05 <= t <= 1.05:
             p_int = p_start + (p_end - p_start).Multiply(t)
             dir_support = (support_end - support_start).Normalize()
             N = XYZ(-dir_support.Y, dir_support.X, 0.0).Normalize()
@@ -1887,6 +1887,17 @@ class RoofFramingEngine(BaseFramingEngine):
             ridge_edges = _find_ridge_edges(planes)
         except Exception:
             ridge_edges = []
+
+        # Filter for horizontal ridges
+        horizontal_ridges = []
+        for edge in ridge_edges:
+            rs_edge, re_edge, pa_edge, pb_edge = edge
+            if abs(re_edge.Z - rs_edge.Z) < RIDGE_TOL:
+                horizontal_ridges.append(edge)
+
+        # If there are ridge edges but no horizontal ridges, fall back to all ridge edges
+        if ridge_edges and not horizontal_ridges:
+            horizontal_ridges = ridge_edges
             
         sloped = [p for p in planes if p.normal.Z < FLAT_THRESHOLD]
         
@@ -1942,7 +1953,7 @@ class RoofFramingEngine(BaseFramingEngine):
             # Dual slope (Gable / Hip) layout
             seen_t = set()
             seen_c = set()
-            for rs, re, pa, pb in ridge_edges:
+            for rs, re, pa, pb in horizontal_ridges:
                 ridge_dir = re - rs
                 ridge_len = ridge_dir.GetLength()
                 if ridge_len < MIN_MEMBER_LENGTH:
@@ -2337,5 +2348,27 @@ class RoofFramingEngine(BaseFramingEngine):
             m_cj.host_id = roof_info.element_id
             m_cj.disallow_end_joins = True
             members.append(m_cj)
+
+        # 3. Generate Ridge and Hip Boards
+        try:
+            members.extend(self._make_ridge_boards(ridge_edges, roof_info))
+        except Exception:
+            pass
+
+        # 4. Generate Jack Rafters on Hip End Planes (planes not adjacent to any horizontal ridge)
+        try:
+            horizontal_planes = set()
+            for rs_edge, re_edge, pa_edge, pb_edge in horizontal_ridges:
+                horizontal_planes.add(pa_edge)
+                horizontal_planes.add(pb_edge)
+
+            for plane in planes:
+                if plane.normal.Z >= FLAT_THRESHOLD:
+                    continue
+                if plane not in horizontal_planes:
+                    rafters = self._make_rafters_for_plane(plane, ridge_edges, roof_info)
+                    members.extend(rafters)
+        except Exception:
+            pass
 
         return members
