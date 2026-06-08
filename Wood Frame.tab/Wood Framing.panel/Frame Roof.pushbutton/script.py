@@ -17,6 +17,11 @@ _lib_dir = os.path.join(_ext_dir, "lib")
 if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
+# Force reload of project modules to ensure latest changes are used
+for mod in list(sys.modules.keys()):
+    if mod.startswith("wf_") or mod == "wf_roof":
+        del sys.modules[mod]
+
 from pyrevit import revit, DB, script, forms
 from pyrevit.forms import WPFWindow
 from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
