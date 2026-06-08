@@ -26,6 +26,21 @@ from wf_families import get_available_types_flat, parse_family_type_label
 from wf_roof import RoofFramingEngine
 from wf_tracking import delete_tracked_members_for_hosts
 
+# ==============================================================================
+# PARAMETRIC WOOD FRAME ENGINEERING CONFIGURATION
+# ==============================================================================
+truss_spacing = 24.0      # center-to-center (O.C.) distance between trusses (inches)
+ceiling_spacing = 16.0    # independent center-to-center distance for ceiling grid (inches)
+truss_type = "KingPost"   # Truss topology: "KingPost" | "Fink" | "Pratt" | "Dynamic"
+
+# Family Symbol Mappings by structural function
+# Format: ("Family Name", "Type Name")
+FAMILY_TOP_CHORDS = ("Wood Dimension Lumber-Framing", "2x6")
+FAMILY_BOTTOM_CHORDS = ("Wood Dimension Lumber-Framing", "2x6")
+FAMILY_WEB_BRACING = ("Wood Dimension Lumber-Framing", "2x4")
+FAMILY_HIPS_RIDGES = ("Wood Dimension Lumber-Framing", "2x8")
+# ==============================================================================
+
 
 output = script.get_output()
 _XAML = os.path.join(os.path.dirname(__file__), "FrameRoofConfig.xaml")
@@ -183,6 +198,15 @@ def main():
         return
 
     config = dialog.result["config"]
+    # Inject parametric variables from the top of the script
+    config.truss_spacing = truss_spacing
+    config.ceiling_spacing = ceiling_spacing
+    config.truss_type = truss_type
+    config.family_top_chords = FAMILY_TOP_CHORDS
+    config.family_bottom_chords = FAMILY_BOTTOM_CHORDS
+    config.family_web_bracing = FAMILY_WEB_BRACING
+    config.family_hips_ridges = FAMILY_HIPS_RIDGES
+
     engine = RoofFramingEngine(doc, config)
 
     total_placed = 0
@@ -192,7 +216,7 @@ def main():
     deleted_existing = 0
     errors = []
 
-    with revit.Transaction("WF: Frame Single-Slope Roofs"):
+    with revit.Transaction("WF: Frame Truss Roofs"):
         deleted_existing = delete_tracked_members_for_hosts(
             doc,
             roofs,
@@ -200,7 +224,7 @@ def main():
         )
         for roof in roofs:
             try:
-                members, roof_info = engine.calculate_members(roof, mode="stick")
+                members, roof_info = engine.calculate_members(roof, mode="truss")
             except Exception as calc_err:
                 errors.append(
                     "Roof {0} calc error: {1}".format(roof.Id.Value, calc_err)
@@ -213,19 +237,8 @@ def main():
                 )
                 continue
 
-            if not getattr(roof_info, "single_slope_supported", True):
-                errors.append(
-                    "Roof {0} skipped: {1}".format(
-                        roof.Id.Value,
-                        getattr(
-                            roof_info,
-                            "single_slope_support_reason",
-                            "Single-slope roof framing currently supports shed roofs only.",
-                        ),
-                    )
-                )
-                skipped_roofs += 1
-                continue
+            # Bypass single-slope check since upgraded truss engine supports complex roof geometries.
+            pass
 
             total_calculated += len(members)
 

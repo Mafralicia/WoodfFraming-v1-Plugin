@@ -685,7 +685,7 @@ class RoofFramingEngine(BaseFramingEngine):
             roof_info.single_slope_support_reason = support_reason
         except Exception:
             pass
-        if not is_supported:
+        if not is_supported and mode != "truss":
             return [], roof_info
         if mode == "truss":
             members = self._calc_truss_positions(roof_info)
@@ -1751,65 +1751,585 @@ class RoofFramingEngine(BaseFramingEngine):
     #  Truss placement
     # ------------------------------------------------------------------
 
+    def _get_support_elements(self, roof_info):
+        from Autodesk.Revit.DB import FilteredElementCollector, Wall, BuiltInCategory, Outline, BoundingBoxIntersectsFilter, XYZ
+        doc = self.doc
+        roof = roof_info.element
+        bbox = roof.get_BoundingBox(None)
+        if bbox is None:
+            return [], []
+        
+        # Expand Outline vertically and horizontally to find walls/beams directly below
+        outline = Outline(
+            XYZ(bbox.Min.X - 2.0, bbox.Min.Y - 2.0, bbox.Min.Z - 12.0),
+            XYZ(bbox.Max.X + 2.0, bbox.Max.Y + 2.0, bbox.Max.Z + 2.0)
+        )
+        box_filter = BoundingBoxIntersectsFilter(outline)
+        
+        walls = list(FilteredElementCollector(doc).OfClass(Wall).WherePasses(box_filter).ToElements())
+        beams = list(FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_StructuralFraming).WherePasses(box_filter).ToElements())
+        return walls, beams
+
+    def _find_supports_along_slice(self, foot_a, foot_b, walls, beams):
+        from Autodesk.Revit.DB import XYZ
+        
+        p1 = foot_a
+        p2 = foot_b
+        U_x = (p2 - p1)
+        L = U_x.GetLength()
+        if L < 1e-9:
+            return []
+        U_x = U_x.Multiply(1.0 / L)
+        
+        intersections = []
+        
+        def check_line_intersection(w_start, w_end, element_z):
+            dx1, dy1 = p2.X - p1.X, p2.Y - p1.Y
+            dx2, dy2 = w_end.X - w_start.X, w_end.Y - w_start.Y
+            denom = dx1 * dy2 - dy1 * dx2
+            if abs(denom) < 1e-7:
+                return None
+            t = ((w_start.X - p1.X) * dy2 - (w_start.Y - p1.Y) * dx2) / denom
+            u = ((w_start.X - p1.X) * dy1 - (w_start.Y - p1.Y) * dx1) / denom
+            
+            if -1e-4 <= u <= 1.0 + 1e-4 and -1e-4 <= t <= 1.0 + 1e-4:
+                pt_xy = p1 + (p2 - p1).Multiply(t)
+                return XYZ(pt_xy.X, pt_xy.Y, element_z)
+            return None
+
+        for wall in walls:
+            try:
+                loc = wall.Location
+                if loc is not None and getattr(loc, "Curve", None) is not None:
+                    curve = loc.Curve
+                    w_start = curve.GetEndPoint(0)
+                    w_end = curve.GetEndPoint(1)
+                    bbox = wall.get_BoundingBox(None)
+                    wall_top_z = bbox.Max.Z if bbox else foot_a.Z
+                    pt = check_line_intersection(w_start, w_end, wall_top_z)
+                    if pt is not None:
+                        intersections.append(pt)
+            except Exception:
+                pass
+                
+        for beam in beams:
+            try:
+                loc = beam.Location
+                if loc is not None and getattr(loc, "Curve", None) is not None:
+                    curve = loc.Curve
+                    b_start = curve.GetEndPoint(0)
+                    b_end = curve.GetEndPoint(1)
+                    bbox = beam.get_BoundingBox(None)
+                    beam_top_z = bbox.Max.Z if bbox else foot_a.Z
+                    pt = check_line_intersection(b_start, b_end, beam_top_z)
+                    if pt is not None:
+                        intersections.append(pt)
+            except Exception:
+                pass
+                
+        return intersections
+
+    def _shorten_to_support_face(self, p_start, p_end, support_start, support_end, support_width):
+        from Autodesk.Revit.DB import XYZ
+        
+        dx1, dy1 = p_end.X - p_start.X, p_end.Y - p_start.Y
+        dx2, dy2 = support_end.X - support_start.X, support_end.Y - support_start.Y
+        denom = dx1 * dy2 - dy1 * dx2
+        if abs(denom) < 1e-7:
+            return p_end
+        t = ((support_start.X - p_start.X) * dy2 - (support_start.Y - p_start.Y) * dx2) / denom
+        u = ((support_start.X - p_start.X) * dy1 - (support_start.Y - p_start.Y) * dx1) / denom
+        
+        if -0.05 <= u <= 1.05 and -0.05 <= t <= 1.05:
+            p_int = p_start + (p_end - p_start).Multiply(t)
+            dir_support = (support_end - support_start).Normalize()
+            N = XYZ(-dir_support.Y, dir_support.X, 0.0).Normalize()
+            D = (p_end - p_start).Normalize()
+            dot = D.DotProduct(N)
+            if abs(dot) > 1e-5:
+                shorten_len = (support_width / 2.0) / abs(dot)
+                # Ensure we don't shorten more than the member length
+                member_len = (p_end - p_start).GetLength()
+                if shorten_len < member_len - 0.1:
+                    return p_int - D.Multiply(shorten_len)
+        return p_end
+
     def _calc_truss_positions(self, roof_info):
         """Place trusses at OC spacing perpendicular to ridge, eave-to-eave."""
+        from Autodesk.Revit.DB import XYZ
+        import math
+
         members = []
         planes = roof_info.planes
-        spacing = self.config.stud_spacing_ft
-        if spacing <= 0:
-            return members
+        
+        # Get parametric variables from config (injected from script.py)
+        truss_spacing_in = getattr(self.config, 'truss_spacing', 24.0)
+        ceiling_spacing_in = getattr(self.config, 'ceiling_spacing', 16.0)
+        truss_spacing = truss_spacing_in / 12.0
+        ceiling_spacing = ceiling_spacing_in / 12.0
+        
+        family_top = getattr(self.config, 'family_top_chords', (self.config.stud_family_name, self.config.stud_type_name))
+        family_bottom = getattr(self.config, 'family_bottom_chords', (self.config.stud_family_name, self.config.stud_type_name))
+        family_web = getattr(self.config, 'family_web_bracing', (self.config.stud_family_name, self.config.stud_type_name))
+        family_edge = getattr(self.config, 'family_hips_ridges', (self.config.stud_family_name, self.config.stud_type_name))
 
+        # Resolve member depths
+        _, tc_depth = self._resolve_roof_member_size(family_top[0], family_top[1])
+        _, bc_depth = self._resolve_roof_member_size(family_bottom[0], family_bottom[1])
+        _, web_depth = self._resolve_roof_member_size(family_web[0], family_web[1])
+        edge_width, _ = self._resolve_roof_member_size(family_edge[0], family_edge[1])
+
+        # Get supports (walls, beams) under roof
+        walls, beams = self._get_support_elements(roof_info)
+
+        # Collect ridges and hips
         try:
             ridge_edges = _find_ridge_edges(planes)
         except Exception:
             ridge_edges = []
-
+            
         sloped = [p for p in planes if p.normal.Z < FLAT_THRESHOLD]
+        
+        truss_lines = []
+        ceiling_lines = []
 
         if not ridge_edges:
-            if sloped:
-                return self._make_rafters_scanline(
-                    sloped[0], spacing, roof_info)
-            return members
+            # Monoslope / shed roof layout
+            if not sloped:
+                return []
+            plane = sloped[0]
+            control_depth = self._resolve_roof_member_center_depth(plane, family_top[0], family_top[1])
+            profile_loops = self._roof_profile_loops_local(plane, control_depth)
+            if not profile_loops:
+                return []
+            points = [point for loop in profile_loops for point in loop]
+            if not points:
+                return []
+            min_x = min(p[0] for p in points)
+            max_x = max(p[0] for p in points)
+            span_x = max_x - min_x
+            
+            # Trusses: equal spacing, always start and finish at bounds
+            num_trusses = int(math.ceil(span_x / truss_spacing)) if truss_spacing > 0 else 1
+            num_trusses = max(1, num_trusses)
+            actual_truss_spacing = span_x / num_trusses
+            
+            for i in range(num_trusses + 1):
+                x = min_x + i * actual_truss_spacing
+                intervals = _scanline_intervals(profile_loops, "x", x)
+                for start_y, end_y in intervals:
+                    if end_y - start_y < MIN_MEMBER_LENGTH:
+                        continue
+                    s_pt = _plane_point_at_depth(plane, x, start_y, control_depth)
+                    e_pt = _plane_point_at_depth(plane, x, end_y, control_depth)
+                    truss_lines.append((s_pt, e_pt, plane))
+                
+            # Ceiling joists: equal spacing, always start and finish at bounds
+            num_ceilings = int(math.ceil(span_x / ceiling_spacing)) if ceiling_spacing > 0 else 1
+            num_ceilings = max(1, num_ceilings)
+            actual_ceiling_spacing = span_x / num_ceilings
+            
+            for i in range(num_ceilings + 1):
+                x = min_x + i * actual_ceiling_spacing
+                intervals = _scanline_intervals(profile_loops, "x", x)
+                for start_y, end_y in intervals:
+                    if end_y - start_y < MIN_MEMBER_LENGTH:
+                        continue
+                    s_pt = _plane_point_at_depth(plane, x, start_y, control_depth)
+                    e_pt = _plane_point_at_depth(plane, x, end_y, control_depth)
+                    ceiling_lines.append((s_pt, e_pt))
+        else:
+            # Dual slope (Gable / Hip) layout
+            seen_t = set()
+            seen_c = set()
+            for rs, re, pa, pb in ridge_edges:
+                ridge_dir = re - rs
+                ridge_len = ridge_dir.GetLength()
+                if ridge_len < MIN_MEMBER_LENGTH:
+                    continue
+                ridge_unit = ridge_dir.Multiply(1.0 / ridge_len)
 
-        seen = set()
-        for rs, re, pa, pb in ridge_edges:
-            ridge_dir = re - rs
-            ridge_len = ridge_dir.GetLength()
-            if ridge_len < MIN_MEMBER_LENGTH:
-                continue
-            ridge_unit = ridge_dir.Multiply(1.0 / ridge_len)
-
-            class_a = _classify_boundary_edges(pa, ridge_edges, (rs, re))
-            class_b = _classify_boundary_edges(pb, ridge_edges, (rs, re))
-            eave_a = class_a["eave"]
-            eave_b = class_b["eave"]
-            if not eave_a or not eave_b:
-                continue
-
-            d = 0.0
-            while d <= ridge_len + 1e-9:
-                ridge_pt = rs + ridge_unit.Multiply(min(d, ridge_len))
-                foot_a = _project_to_best_eave(ridge_pt, eave_a, rs, re)
-                foot_b = _project_to_best_eave(ridge_pt, eave_b, rs, re)
-                if foot_a is None or foot_b is None:
-                    d += spacing
+                class_a = _classify_boundary_edges(pa, ridge_edges, (rs, re))
+                class_b = _classify_boundary_edges(pb, ridge_edges, (rs, re))
+                eave_a = class_a["eave"]
+                eave_b = class_b["eave"]
+                if not eave_a or not eave_b:
                     continue
 
-                if _dist(foot_a, foot_b) >= MIN_MEMBER_LENGTH:
-                    key = (_pt_key(foot_a), _pt_key(foot_b))
-                    rkey = (_pt_key(foot_b), _pt_key(foot_a))
-                    if key not in seen and rkey not in seen:
-                        seen.add(key)
-                        m = FramingMember(FramingMember.STUD, foot_a, foot_b)
-                        m.member_type = "TRUSS"
-                        m.family_name = self.config.stud_family_name
-                        m.type_name = self.config.stud_type_name
-                        m.rotation = 0.0
-                        m.host_kind = roof_info.kind
-                        m.host_id = roof_info.element_id
-                        members.append(m)
+                # Trusses: equal spacing, always start and finish at bounds
+                num_trusses = int(math.ceil(ridge_len / truss_spacing)) if truss_spacing > 0 else 1
+                num_trusses = max(1, num_trusses)
+                actual_truss_spacing = ridge_len / num_trusses
+                
+                for i in range(num_trusses + 1):
+                    d = i * actual_truss_spacing
+                    ridge_pt = rs + ridge_unit.Multiply(d)
+                    foot_a = _project_to_best_eave(ridge_pt, eave_a, rs, re)
+                    foot_b = _project_to_best_eave(ridge_pt, eave_b, rs, re)
+                    if foot_a is None or foot_b is None:
+                        continue
+                    if _dist(foot_a, foot_b) >= MIN_MEMBER_LENGTH:
+                        key = (_pt_key(foot_a), _pt_key(foot_b))
+                        rkey = (_pt_key(foot_b), _pt_key(foot_a))
+                        if key not in seen_t and rkey not in seen_t:
+                            seen_t.add(key)
+                            truss_lines.append((foot_a, foot_b, pa, pb, ridge_pt))
 
-                d += spacing
+                # Ceiling joists: equal spacing, always start and finish at bounds
+                num_ceilings = int(math.ceil(ridge_len / ceiling_spacing)) if ceiling_spacing > 0 else 1
+                num_ceilings = max(1, num_ceilings)
+                actual_ceiling_spacing = ridge_len / num_ceilings
+                
+                for i in range(num_ceilings + 1):
+                    d = i * actual_ceiling_spacing
+                    ridge_pt = rs + ridge_unit.Multiply(d)
+                    foot_a = _project_to_best_eave(ridge_pt, eave_a, rs, re)
+                    foot_b = _project_to_best_eave(ridge_pt, eave_b, rs, re)
+                    if foot_a is None or foot_b is None:
+                        continue
+                    if _dist(foot_a, foot_b) >= MIN_MEMBER_LENGTH:
+                        key = (_pt_key(foot_a), _pt_key(foot_b))
+                        rkey = (_pt_key(foot_b), _pt_key(foot_a))
+                        if key not in seen_c and rkey not in seen_c:
+                            seen_c.add(key)
+                            ceiling_lines.append((foot_a, foot_b))
+
+        def is_near_any_truss(c_start, c_end):
+            for t_line in truss_lines:
+                t_start = t_line[0]
+                t_end = t_line[1]
+                dist_s = _dist(c_start, t_start)
+                dist_e = _dist(c_end, t_end)
+                if dist_s < inches_to_feet(2.0) and dist_e < inches_to_feet(2.0):
+                    return True
+            return False
+
+        # 1. Generate Truss Elements
+        for t_data in truss_lines:
+            if len(t_data) == 5:
+                # Gable/Hip Truss
+                foot_a, foot_b, pa, pb, ridge_pt = t_data
+                joist_z = min(foot_a.Z, foot_b.Z)
+                
+                p_eave_a = XYZ(foot_a.X, foot_a.Y, joist_z)
+                p_eave_b = XYZ(foot_b.X, foot_b.Y, joist_z)
+                U_x = (p_eave_b - p_eave_a).Normalize()
+                
+                layer_depth_a = self._resolve_roof_layer_top_depth(pa)
+                layer_depth_b = self._resolve_roof_layer_top_depth(pb)
+                
+                p_eave_a_shifted = p_eave_a - pa.normal.Multiply(layer_depth_a)
+                p_eave_b_shifted = p_eave_b - pb.normal.Multiply(layer_depth_b)
+                layer_depth_avg = (layer_depth_a + layer_depth_b) * 0.5
+                ridge_shifted = ridge_pt - pa.normal.Multiply(layer_depth_avg)
+                
+                intersections = self._find_supports_along_slice(p_eave_a, p_eave_b, walls, beams)
+                if len(intersections) >= 2:
+                    intersections.sort(key=lambda pt: (pt - p_eave_a).DotProduct(U_x))
+                    support_a = intersections[0]
+                    support_b = intersections[-1]
+                else:
+                    tot_len = (p_eave_b - p_eave_a).GetLength()
+                    oh = min(1.5, tot_len * 0.15)
+                    support_a = p_eave_a + U_x.Multiply(oh)
+                    support_b = p_eave_b - U_x.Multiply(oh)
+                    
+                L = (support_b - support_a).GetLength()
+                if L < MIN_MEMBER_LENGTH:
+                    continue
+                
+                x_eave_a = (p_eave_a_shifted - support_a).DotProduct(U_x)
+                y_eave_a = p_eave_a_shifted.Z - joist_z
+                
+                x_eave_b = (p_eave_b_shifted - support_a).DotProduct(U_x)
+                y_eave_b = p_eave_b_shifted.Z - joist_z
+                
+                x_ridge = (ridge_shifted - support_a).DotProduct(U_x)
+                y_ridge = ridge_shifted.Z - joist_z
+                
+                m_L = (y_ridge - y_eave_a) / (x_ridge - x_eave_a) if abs(x_ridge - x_eave_a) > 1e-5 else 0.0
+                m_R = (y_ridge - y_eave_b) / (x_ridge - x_eave_b) if abs(x_ridge - x_eave_b) > 1e-5 else 0.0
+                theta_L = math.atan(m_L)
+                theta_R = math.atan(m_R)
+                
+                y_bc = bc_depth / 2.0
+                
+                C_L = y_ridge - m_L * x_ridge - (tc_depth / (2.0 * math.cos(theta_L)))
+                C_R = y_ridge - m_R * x_ridge - (tc_depth / (2.0 * math.cos(theta_R)))
+                
+                if abs(m_L - m_R) > 1e-5:
+                    x_ridge_node = (C_R - C_L) / (m_L - m_R)
+                    y_ridge_node = m_L * x_ridge_node + C_L
+                else:
+                    x_ridge_node = x_ridge
+                    y_ridge_node = y_ridge - (tc_depth / 2.0)
+                n_ridge = (x_ridge_node, y_ridge_node)
+                
+                x_heel_L = (y_bc - C_L) / m_L if abs(m_L) > 1e-5 else x_eave_a
+                n_heel_L = (x_heel_L, y_bc)
+                
+                x_heel_R = (y_bc - C_R) / m_R if abs(m_R) > 1e-5 else x_eave_b
+                n_heel_R = (x_heel_R, y_bc)
+                
+                n_eave_L = (x_eave_a, m_L * x_eave_a + C_L)
+                n_eave_R = (x_eave_b, m_R * x_eave_b + C_R)
+                
+                nodes = {}
+                webs = []
+                
+                span_node = x_heel_R - x_heel_L
+                topology = getattr(self.config, 'truss_type', 'Dynamic')
+                if topology == "Dynamic":
+                    if span_node < 16.0:
+                        topology = "KingPost"
+                    elif span_node <= 28.0:
+                        topology = "Fink"
+                    else:
+                        topology = "Pratt"
+
+                if topology == "KingPost":
+                    # KingPost Topology
+                    nodes["heel_L"] = n_heel_L
+                    nodes["heel_R"] = n_heel_R
+                    nodes["ridge"] = n_ridge
+                    nodes["bot_mid"] = (x_heel_L + span_node / 2.0, y_bc)
+                    webs.append(("bot_mid", "ridge"))
+                elif topology == "Fink":
+                    # Fink Topology
+                    nodes["heel_L"] = n_heel_L
+                    nodes["heel_R"] = n_heel_R
+                    nodes["ridge"] = n_ridge
+                    nodes["bot_mid"] = (x_heel_L + span_node / 2.0, y_bc)
+                    nodes["bot_L_third"] = (x_heel_L + span_node / 3.0, y_bc)
+                    nodes["bot_R_third"] = (x_heel_L + 2.0 * span_node / 3.0, y_bc)
+                    nodes["top_L_mid"] = ((n_heel_L[0] + n_ridge[0]) / 2.0, (n_heel_L[1] + n_ridge[1]) / 2.0)
+                    nodes["top_R_mid"] = ((n_heel_R[0] + n_ridge[0]) / 2.0, (n_heel_R[1] + n_ridge[1]) / 2.0)
+                    webs.append(("bot_mid", "top_L_mid"))
+                    webs.append(("bot_L_third", "top_L_mid"))
+                    webs.append(("bot_mid", "top_R_mid"))
+                    webs.append(("bot_R_third", "top_R_mid"))
+                else:
+                    # Pratt Topology (6 panels)
+                    nodes["heel_L"] = n_heel_L
+                    nodes["heel_R"] = n_heel_R
+                    nodes["ridge"] = n_ridge
+                    
+                    dx = span_node / 6.0
+                    for i in range(1, 6):
+                        nodes["bot_{0}".format(i)] = (x_heel_L + i * dx, y_bc)
+                    
+                    nodes["top_1"] = (x_heel_L + dx, m_L * (x_heel_L + dx) + C_L)
+                    nodes["top_2"] = (x_heel_L + 2.0 * dx, m_L * (x_heel_L + 2.0 * dx) + C_L)
+                    nodes["top_4"] = (x_heel_L + 4.0 * dx, m_R * (x_heel_L + 4.0 * dx) + C_R)
+                    nodes["top_5"] = (x_heel_L + 5.0 * dx, m_R * (x_heel_L + 5.0 * dx) + C_R)
+                    
+                    webs.append(("top_1", "bot_1"))
+                    webs.append(("top_2", "bot_2"))
+                    webs.append(("ridge", "bot_3"))
+                    webs.append(("top_4", "bot_4"))
+                    webs.append(("top_5", "bot_5"))
+                    
+                    webs.append(("heel_L", "top_1"))
+                    webs.append(("top_1", "bot_2"))
+                    webs.append(("top_2", "bot_3"))
+                    webs.append(("top_4", "bot_3"))
+                    webs.append(("top_5", "bot_4"))
+                    webs.append(("heel_R", "top_5"))
+                
+                def to_3d(n2d):
+                    return support_a + U_x.Multiply(n2d[0]) + XYZ.BasisZ.Multiply(n2d[1])
+                
+                p3d_heel_L = to_3d(n_heel_L)
+                p3d_heel_R = to_3d(n_heel_R)
+                p3d_ridge = to_3d(n_ridge)
+                p3d_eave_L = to_3d(n_eave_L)
+                p3d_eave_R = to_3d(n_eave_R)
+                
+                m_bc = FramingMember(FramingMember.STUD, p3d_heel_L, p3d_heel_R)
+                m_bc.member_type = "BOTTOM_CHORD"
+                m_bc.family_name = family_bottom[0]
+                m_bc.type_name = family_bottom[1]
+                m_bc.rotation = -math.pi / 2.0
+                m_bc.host_kind = roof_info.kind
+                m_bc.host_id = roof_info.element_id
+                m_bc.disallow_end_joins = True
+                members.append(m_bc)
+                
+                left_end_pt = p3d_ridge
+                right_end_pt = p3d_ridge
+                
+                if ridge_edges:
+                    for rs_edge, re_edge, _, _ in ridge_edges:
+                        left_end_pt = self._shorten_to_support_face(p3d_eave_L, left_end_pt, rs_edge, re_edge, edge_width)
+                        right_end_pt = self._shorten_to_support_face(p3d_eave_R, right_end_pt, rs_edge, re_edge, edge_width)
+                        
+                m_tc_L = FramingMember(FramingMember.STUD, p3d_eave_L, left_end_pt)
+                m_tc_L.member_type = "TOP_CHORD"
+                m_tc_L.family_name = family_top[0]
+                m_tc_L.type_name = family_top[1]
+                m_tc_L.rotation = _rotation_from_up(left_end_pt - p3d_eave_L, pa.normal)
+                m_tc_L.host_kind = roof_info.kind
+                m_tc_L.host_id = roof_info.element_id
+                m_tc_L.disallow_end_joins = True
+                members.append(m_tc_L)
+                
+                m_tc_R = FramingMember(FramingMember.STUD, p3d_eave_R, right_end_pt)
+                m_tc_R.member_type = "TOP_CHORD"
+                m_tc_R.family_name = family_top[0]
+                m_tc_R.type_name = family_top[1]
+                m_tc_R.rotation = _rotation_from_up(right_end_pt - p3d_eave_R, pb.normal)
+                m_tc_R.host_kind = roof_info.kind
+                m_tc_R.host_id = roof_info.element_id
+                m_tc_R.disallow_end_joins = True
+                members.append(m_tc_R)
+                
+                for w_start_key, w_end_key in webs:
+                    w_start_2d = nodes[w_start_key]
+                    w_end_2d = nodes[w_end_key]
+                    w_start_3d = to_3d(w_start_2d)
+                    w_end_3d = to_3d(w_end_2d)
+                    
+                    m_web = FramingMember(FramingMember.STUD, w_start_3d, w_end_3d)
+                    m_web.member_type = "WEB_BRACING"
+                    m_web.family_name = family_web[0]
+                    m_web.type_name = family_web[1]
+                    m_web.rotation = _rotation_from_up(w_end_3d - w_start_3d, pa.normal)
+                    m_web.host_kind = roof_info.kind
+                    m_web.host_id = roof_info.element_id
+                    m_web.disallow_end_joins = True
+                    members.append(m_web)
+                    
+            else:
+                # Monoslope Truss (Shed Roof)
+                s_pt, e_pt, plane = t_data
+                joist_z = min(s_pt.Z, e_pt.Z)
+                
+                p_eave_low = XYZ(s_pt.X, s_pt.Y, joist_z)
+                p_eave_high = XYZ(e_pt.X, e_pt.Y, joist_z)
+                U_x = (p_eave_high - p_eave_low).Normalize()
+                
+                layer_depth = self._resolve_roof_layer_top_depth(plane)
+                p_eave_low_shifted = p_eave_low - plane.normal.Multiply(layer_depth)
+                p_eave_high_shifted = p_eave_high - plane.normal.Multiply(layer_depth)
+                
+                intersections = self._find_supports_along_slice(p_eave_low, p_eave_high, walls, beams)
+                if len(intersections) >= 2:
+                    intersections.sort(key=lambda pt: (pt - p_eave_low).DotProduct(U_x))
+                    support_low = intersections[0]
+                    support_high = intersections[-1]
+                else:
+                    tot_len = (p_eave_high - p_eave_low).GetLength()
+                    oh = min(1.5, tot_len * 0.15)
+                    support_low = p_eave_low + U_x.Multiply(oh)
+                    support_high = p_eave_high - U_x.Multiply(oh)
+                    
+                L = (support_high - support_low).GetLength()
+                if L < MIN_MEMBER_LENGTH:
+                    continue
+                
+                x_eave_low = (p_eave_low_shifted - support_low).DotProduct(U_x)
+                y_eave_low = p_eave_low_shifted.Z - joist_z
+                
+                x_eave_high = (p_eave_high_shifted - support_low).DotProduct(U_x)
+                y_eave_high = p_eave_high_shifted.Z - joist_z
+                
+                m = (y_eave_high - y_eave_low) / (x_eave_high - x_eave_low) if abs(x_eave_high - x_eave_low) > 1e-5 else 0.0
+                theta = math.atan(m)
+                
+                y_bc = bc_depth / 2.0
+                C = y_eave_low - m * x_eave_low - (tc_depth / (2.0 * math.cos(theta)))
+                
+                x_heel_L = (y_bc - C) / m if abs(m) > 1e-5 else x_eave_low
+                n_heel_L = (x_heel_L, y_bc)
+                
+                n_heel_R = (L, y_bc)
+                y_top_high = m * L + C
+                n_top_R = (L, y_top_high)
+                
+                n_eave_low = (x_eave_low, m * x_eave_low + C)
+                n_eave_high = (x_eave_high, m * x_eave_high + C)
+                
+                span_node = L - x_heel_L
+                if span_node < 12.0:
+                    N_panels = 2
+                elif span_node <= 24.0:
+                    N_panels = 3
+                else:
+                    N_panels = 4
+                
+                dx = span_node / N_panels
+                nodes = {}
+                webs = []
+                
+                for i in range(N_panels + 1):
+                    x_i = x_heel_L + i * dx
+                    nodes["bot_{0}".format(i)] = (x_i, y_bc)
+                    nodes["top_{0}".format(i)] = (x_i, m * x_i + C)
+                    
+                    if i > 0:
+                        webs.append(("top_{0}".format(i), "bot_{0}".format(i)))
+                        webs.append(("bot_{0}".format(i-1), "top_{0}".format(i)))
+                
+                def to_3d(n2d):
+                    return support_low + U_x.Multiply(n2d[0]) + XYZ.BasisZ.Multiply(n2d[1])
+                
+                p3d_heel_L = to_3d(n_heel_L)
+                p3d_heel_R = to_3d(n_heel_R)
+                p3d_eave_low = to_3d(n_eave_low)
+                p3d_eave_high = to_3d(n_eave_high)
+                
+                m_bc = FramingMember(FramingMember.STUD, p3d_heel_L, p3d_heel_R)
+                m_bc.member_type = "BOTTOM_CHORD"
+                m_bc.family_name = family_bottom[0]
+                m_bc.type_name = family_bottom[1]
+                m_bc.rotation = -math.pi / 2.0
+                m_bc.host_kind = roof_info.kind
+                m_bc.host_id = roof_info.element_id
+                m_bc.disallow_end_joins = True
+                members.append(m_bc)
+                
+                m_tc = FramingMember(FramingMember.STUD, p3d_eave_low, p3d_eave_high)
+                m_tc.member_type = "TOP_CHORD"
+                m_tc.family_name = family_top[0]
+                m_tc.type_name = family_top[1]
+                m_tc.rotation = _rotation_from_up(p3d_eave_high - p3d_eave_low, plane.normal)
+                m_tc.host_kind = roof_info.kind
+                m_tc.host_id = roof_info.element_id
+                m_tc.disallow_end_joins = True
+                members.append(m_tc)
+                
+                for w_start_key, w_end_key in webs:
+                    w_start_3d = to_3d(nodes[w_start_key])
+                    w_end_3d = to_3d(nodes[w_end_key])
+                    m_web = FramingMember(FramingMember.STUD, w_start_3d, w_end_3d)
+                    m_web.member_type = "WEB_BRACING"
+                    m_web.family_name = family_web[0]
+                    m_web.type_name = family_web[1]
+                    m_web.rotation = _rotation_from_up(w_end_3d - w_start_3d, plane.normal)
+                    m_web.host_kind = roof_info.kind
+                    m_web.host_id = roof_info.element_id
+                    m_web.disallow_end_joins = True
+                    members.append(m_web)
+
+        # 2. Generate Ceiling Joists (Grid)
+        for c_data in ceiling_lines:
+            c_start, c_end = c_data
+            
+            if is_near_any_truss(c_start, c_end):
+                continue
+                
+            joist_z = min(c_start.Z, c_end.Z)
+            p_joist_start = XYZ(c_start.X, c_start.Y, joist_z + bc_depth / 2.0)
+            p_joist_end = XYZ(c_end.X, c_end.Y, joist_z + bc_depth / 2.0)
+            
+            m_cj = FramingMember(FramingMember.STUD, p_joist_start, p_joist_end)
+            m_cj.member_type = "CEILING_JOIST"
+            m_cj.family_name = family_bottom[0]
+            m_cj.type_name = family_bottom[1]
+            m_cj.rotation = -math.pi / 2.0
+            m_cj.host_kind = roof_info.kind
+            m_cj.host_id = roof_info.element_id
+            m_cj.disallow_end_joins = True
+            members.append(m_cj)
 
         return members

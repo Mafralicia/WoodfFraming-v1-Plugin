@@ -113,6 +113,15 @@ class BaseFramingEngine(object):
             except Exception:
                 pass
 
+            # Enable structural analytical model for structural analysis export
+            try:
+                from Autodesk.Revit.DB import BuiltInParameter
+                param = instance.get_Parameter(BuiltInParameter.STRUCTURAL_ANALYTICAL_MODEL)
+                if param is not None and not param.IsReadOnly:
+                    param.Set(1)  # 1 = True (enabled)
+            except Exception:
+                pass
+
             placed.append(instance)
             self._last_placed_pairs.append((member, instance))
 
@@ -134,6 +143,7 @@ class BaseFramingEngine(object):
                         if is_col
                         else BuiltInCategory.OST_StructuralColumns)
 
+        # 1. Try to find the member-specific family symbol
         if member.family_name and member.type_name:
             symbol = find_family_symbol(
                 self.doc,
@@ -152,6 +162,7 @@ class BaseFramingEngine(object):
             if symbol is not None:
                 return symbol
 
+        # 2. Fall back to config's stud family symbol
         if self.config.stud_family_name and self.config.stud_type_name:
             symbol = find_family_symbol(
                 self.doc,
@@ -161,12 +172,30 @@ class BaseFramingEngine(object):
             )
             if symbol is not None:
                 return symbol
-            return find_family_symbol(
+            symbol = find_family_symbol(
                 self.doc,
                 self.config.stud_family_name,
                 self.config.stud_type_name,
                 fallback_cat,
             )
+            if symbol is not None:
+                return symbol
+
+        # 3. Last resort fallback: find any structural framing symbol loaded in the document
+        from Autodesk.Revit.DB import FilteredElementCollector, FamilySymbol
+        try:
+            any_symbol = FilteredElementCollector(self.doc).OfCategory(primary_cat).OfClass(FamilySymbol).FirstElement()
+            if any_symbol is not None:
+                return any_symbol
+        except Exception:
+            pass
+            
+        try:
+            any_symbol = FilteredElementCollector(self.doc).OfCategory(fallback_cat).OfClass(FamilySymbol).FirstElement()
+            if any_symbol is not None:
+                return any_symbol
+        except Exception:
+            pass
 
         return None
 
