@@ -110,6 +110,8 @@ class FrameRoofDialog(WPFWindow):
             self.cb_web_type.IsEnabled = is_truss
         if hasattr(self, "chk_include_kickers") and self.chk_include_kickers:
             self.chk_include_kickers.IsEnabled = not is_truss
+        if hasattr(self, "chk_include_king_posts") and self.chk_include_king_posts:
+            self.chk_include_king_posts.IsEnabled = not is_truss
 
     def _on_truss_custom_checked(self, sender, args):
         self.tb_truss_custom.IsEnabled = True
@@ -181,6 +183,7 @@ class FrameRoofDialog(WPFWindow):
         cfg.truss_type = selected_truss_type
         cfg.web_spacing = web_sp
         cfg.include_roof_kickers = self.chk_include_kickers.IsChecked
+        cfg.include_king_posts = self.chk_include_king_posts.IsChecked
         cfg.family_top_chords = family_tc
         cfg.family_bottom_chords = family_bc
         cfg.family_web_bracing = family_web
@@ -204,6 +207,7 @@ class FrameRoofDialog(WPFWindow):
             data["_truss_type_idx"] = self.cb_truss_type.SelectedIndex
             data["_web_spacing"] = self.tb_web_spacing.Text
             data["_include_kickers"] = self.chk_include_kickers.IsChecked
+            data["_include_king_posts"] = self.chk_include_king_posts.IsChecked
             data["_tc_label"] = str(self.cb_tc_type.SelectedItem or "")
             data["_bc_label"] = str(self.cb_bc_type.SelectedItem or "")
             data["_web_label"] = str(self.cb_web_type.SelectedItem or "")
@@ -239,6 +243,7 @@ class FrameRoofDialog(WPFWindow):
             self.cb_truss_type.SelectedIndex = truss_type_idx
             self.tb_web_spacing.Text = data.get("_web_spacing", "48")
             self.chk_include_kickers.IsChecked = data.get("_include_kickers", False)
+            self.chk_include_king_posts.IsChecked = data.get("_include_king_posts", False)
 
             tc_label = data.get("_tc_label", "")
             if tc_label and tc_label in self._framing_labels:

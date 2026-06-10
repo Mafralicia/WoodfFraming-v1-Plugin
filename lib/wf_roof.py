@@ -882,6 +882,185 @@ class RoofFramingEngine(BaseFramingEngine):
         except Exception:
             return roof_info.level_elevation
 
+    def _calc_ridges_hips_valleys(self, graph, roof_info):
+        from Autodesk.Revit.DB import XYZ
+        import math
+        
+        def is_finite_xyz(pt):
+            return (not math.isnan(pt.X) and not math.isinf(pt.X) and
+                    not math.isnan(pt.Y) and not math.isinf(pt.Y) and
+                    not math.isnan(pt.Z) and not math.isinf(pt.Z))
+                    
+        # Ridge and Hip dimensions
+        ridge_family = self.config.header_family_name or self.config.stud_family_name
+        ridge_type = self.config.header_type_name or self.config.stud_type_name
+        ridge_width, ridge_depth = self._resolve_roof_member_size(ridge_family, ridge_type)
+        if ridge_width is None or ridge_width <= 0.0:
+            ridge_width = 1.5 / 12.0
+        if ridge_depth is None or ridge_depth <= 0.0:
+            ridge_depth = 7.25 / 12.0
+
+        members = []
+        ridge_seen = set()
+        ridge_edges_for_ties = []
+        
+        # Initialize lifecycle tracking if not already present
+        if not hasattr(self, "_edge_lifecycle") or self._edge_lifecycle is None:
+            self._edge_lifecycle = {}
+
+        # 3. Place Ridge Boards
+        for edge in graph.edges.values():
+            if edge.edge_type == "RIDGE":
+                edge_key = (min(edge.node_a.key, edge.node_b.key), max(edge.node_a.key, edge.node_b.key))
+                
+                self._edge_lifecycle[edge_key] = {
+                    "type": "RIDGE",
+                    "detected": "YES",
+                    "created": "NO",
+                    "appended": "NO",
+                    "sent_to_placement": "NO",
+                    "successfully_placed": "NO",
+                    "start": edge.node_a.pt,
+                    "end": edge.node_b.pt,
+                    "length": (edge.node_b.pt - edge.node_a.pt).GetLength(),
+                    "family_resolved": "None",
+                    "type_resolved": "None",
+                    "element_id": "None",
+                    "offset_logged": "None",
+                    "skip_reason": "None"
+                }
+
+                if edge_key in ridge_seen:
+                    self._edge_lifecycle[edge_key]["skip_reason"] = "Duplicate ridge edge"
+                    continue
+                ridge_seen.add(edge_key)
+                
+                faces = list(edge.faces)
+                if len(faces) >= 2:
+                    ridge_edges_for_ties.append((edge.node_a.pt, edge.node_b.pt, faces[0].plane_info, faces[1].plane_info))
+                
+                # Geometry Validation
+                length = (edge.node_b.pt - edge.node_a.pt).GetLength()
+                skip_reason = None
+                if length < MIN_MEMBER_LENGTH:
+                    skip_reason = "Below MIN_MEMBER_LENGTH ({:.3f} ft)".format(length)
+                elif edge.node_a.pt.DistanceTo(edge.node_b.pt) < 1e-4:
+                    skip_reason = "Start and End points are identical"
+                elif not is_finite_xyz(edge.node_a.pt) or not is_finite_xyz(edge.node_b.pt):
+                    skip_reason = "Non-finite coordinates detected"
+                    
+                if skip_reason is not None:
+                    self._edge_lifecycle[edge_key]["skip_reason"] = skip_reason
+                    try:
+                        from pyrevit import script
+                        script.get_output().print_md("> **Skipped RIDGE edge**: length={:.3f} ft, reason: {}".format(length, skip_reason))
+                    except Exception:
+                        pass
+                    continue
+
+                m = FramingMember(FramingMember.HEADER, edge.node_a.pt, edge.node_b.pt)
+                m.member_type = "RIDGE_BOARD"
+                m.family_name = ridge_family
+                m.type_name = ridge_type
+                m.edge_key = edge_key
+                self._edge_lifecycle[edge_key]["created"] = "YES"
+                
+                depth_sync = 0.0
+                for face in edge.faces:
+                    depth_sync = max(depth_sync, self._resolve_roof_layer_top_depth(face.plane_info))
+                shift_z = depth_sync + ridge_depth / 2.0
+                
+                # Log applied offsets
+                offset_msg = "shift_z={:.3f} ft (depth_sync={:.3f} ft, ridge_depth={:.3f} ft)".format(shift_z, depth_sync, ridge_depth)
+                self._edge_lifecycle[edge_key]["offset_logged"] = offset_msg
+                
+                m.start_point = edge.node_a.pt - XYZ(0, 0, shift_z)
+                m.end_point = edge.node_b.pt - XYZ(0, 0, shift_z)
+                m.rotation = 0.0
+                m.disallow_end_joins = True
+                m.host_kind = roof_info.kind
+                m.host_id = roof_info.element_id
+                members.append(m)
+                self._edge_lifecycle[edge_key]["appended"] = "YES"
+                
+        # 4. Place Hip and Valley Rafters
+        for edge in graph.edges.values():
+            if edge.edge_type in ("HIP", "VALLEY"):
+                edge_key = (min(edge.node_a.key, edge.node_b.key), max(edge.node_a.key, edge.node_b.key))
+                
+                self._edge_lifecycle[edge_key] = {
+                    "type": edge.edge_type,
+                    "detected": "YES",
+                    "created": "NO",
+                    "appended": "NO",
+                    "sent_to_placement": "NO",
+                    "successfully_placed": "NO",
+                    "start": edge.node_a.pt,
+                    "end": edge.node_b.pt,
+                    "length": (edge.node_b.pt - edge.node_a.pt).GetLength(),
+                    "family_resolved": "None",
+                    "type_resolved": "None",
+                    "element_id": "None",
+                    "offset_logged": "None",
+                    "skip_reason": "None"
+                }
+
+                # Geometry Validation
+                length = (edge.node_b.pt - edge.node_a.pt).GetLength()
+                skip_reason = None
+                if length < MIN_MEMBER_LENGTH:
+                    skip_reason = "Below MIN_MEMBER_LENGTH ({:.3f} ft)".format(length)
+                elif edge.node_a.pt.DistanceTo(edge.node_b.pt) < 1e-4:
+                    skip_reason = "Start and End points are identical"
+                elif not is_finite_xyz(edge.node_a.pt) or not is_finite_xyz(edge.node_b.pt):
+                    skip_reason = "Non-finite coordinates detected"
+                    
+                if skip_reason is not None:
+                    self._edge_lifecycle[edge_key]["skip_reason"] = skip_reason
+                    try:
+                        from pyrevit import script
+                        script.get_output().print_md("> **Skipped {} edge**: length={:.3f} ft, reason: {}".format(edge.edge_type, length, skip_reason))
+                    except Exception:
+                        pass
+                    continue
+
+                m = FramingMember(FramingMember.HEADER, edge.node_a.pt, edge.node_b.pt)
+                m.member_type = "HIP_RAFTER" if edge.edge_type == "HIP" else "VALLEY_RAFTER"
+                m.family_name = ridge_family
+                m.type_name = ridge_type
+                m.edge_key = edge_key
+                self._edge_lifecycle[edge_key]["created"] = "YES"
+                
+                avg_normal = XYZ(0, 0, 0)
+                depth_sync = 0.0
+                for face in edge.faces:
+                    avg_normal = avg_normal + face.normal
+                    depth_sync = max(depth_sync, self._resolve_roof_layer_top_depth(face.plane_info))
+                if len(edge.faces) > 0:
+                    avg_normal = avg_normal.Multiply(1.0 / len(edge.faces)).Normalize()
+                else:
+                    avg_normal = XYZ(0, 0, 1)
+                    
+                shift = avg_normal.Multiply(depth_sync + ridge_depth / 2.0)
+                
+                # Log applied offsets
+                offset_msg = "shift vector=({:.3f}, {:.3f}, {:.3f}), avg_normal=({:.3f}, {:.3f}, {:.3f}), depth_sync={:.3f} ft".format(
+                    shift.X, shift.Y, shift.Z, avg_normal.X, avg_normal.Y, avg_normal.Z, depth_sync
+                )
+                self._edge_lifecycle[edge_key]["offset_logged"] = offset_msg
+                
+                m.start_point = edge.node_a.pt - shift
+                m.end_point = edge.node_b.pt - shift
+                
+                m.rotation = _rotation_from_up(edge.node_b.pt - edge.node_a.pt, avg_normal)
+                m.disallow_end_joins = True
+                m.host_kind = roof_info.kind
+                m.host_id = roof_info.element_id
+                members.append(m)
+                self._edge_lifecycle[edge_key]["appended"] = "YES"
+
+        return members, ridge_edges_for_ties
+
     def place_members(self, members, host_info):
         """Place roof members and apply roof-specific post-processing."""
         # 1. Trace lifecycle: sent_to_placement
@@ -1209,181 +1388,9 @@ class RoofFramingEngine(BaseFramingEngine):
         if rafter_depth is None or rafter_depth <= 0.0:
             rafter_depth = 5.5 / 12.0
             
-        # Ridge and Hip dimensions
-        ridge_family = self.config.header_family_name or self.config.stud_family_name
-        ridge_type = self.config.header_type_name or self.config.stud_type_name
-        ridge_width, ridge_depth = self._resolve_roof_member_size(ridge_family, ridge_type)
-        if ridge_width is None or ridge_width <= 0.0:
-            ridge_width = 1.5 / 12.0
-        if ridge_depth is None or ridge_depth <= 0.0:
-            ridge_depth = 7.25 / 12.0
-            
-        # 3. Place Ridge Boards
-        ridge_seen = set()
-        ridge_edges_for_ties = []
-        for edge in graph.edges.values():
-            if edge.edge_type == "RIDGE":
-                edge_key = (min(edge.node_a.key, edge.node_b.key), max(edge.node_a.key, edge.node_b.key))
-                
-                # Initialize lifecycle tracking
-                self._edge_lifecycle[edge_key] = {
-                    "type": "RIDGE",
-                    "detected": "YES",
-                    "created": "NO",
-                    "appended": "NO",
-                    "sent_to_placement": "NO",
-                    "successfully_placed": "NO",
-                    "start": edge.node_a.pt,
-                    "end": edge.node_b.pt,
-                    "length": (edge.node_b.pt - edge.node_a.pt).GetLength(),
-                    "family_resolved": "None",
-                    "type_resolved": "None",
-                    "element_id": "None",
-                    "offset_logged": "None",
-                    "skip_reason": "None"
-                }
-
-                if edge_key in ridge_seen:
-                    self._edge_lifecycle[edge_key]["skip_reason"] = "Duplicate ridge edge"
-                    continue
-                ridge_seen.add(edge_key)
-                
-                faces = list(edge.faces)
-                if len(faces) >= 2:
-                    ridge_edges_for_ties.append((edge.node_a.pt, edge.node_b.pt, faces[0].plane_info, faces[1].plane_info))
-                
-                # Geometry Validation
-                length = (edge.node_b.pt - edge.node_a.pt).GetLength()
-                skip_reason = None
-                if length < MIN_MEMBER_LENGTH:
-                    skip_reason = "Below MIN_MEMBER_LENGTH ({:.3f} ft)".format(length)
-                elif edge.node_a.pt.DistanceTo(edge.node_b.pt) < 1e-4:
-                    skip_reason = "Start and End points are identical"
-                elif not is_finite_xyz(edge.node_a.pt) or not is_finite_xyz(edge.node_b.pt):
-                    skip_reason = "Non-finite coordinates detected"
-                    
-                if skip_reason is not None:
-                    self._edge_lifecycle[edge_key]["skip_reason"] = skip_reason
-                    try:
-                        from pyrevit import script
-                        script.get_output().print_md("> **Skipped RIDGE edge**: length={:.3f} ft, reason: {}".format(length, skip_reason))
-                    except Exception:
-                        pass
-                    continue
-
-                m = FramingMember(FramingMember.HEADER, edge.node_a.pt, edge.node_b.pt)
-                m.member_type = "RIDGE_BOARD"
-                m.family_name = ridge_family
-                m.type_name = ridge_type
-                m.edge_key = edge_key
-                self._edge_lifecycle[edge_key]["created"] = "YES"
-                
-                depth_sync = 0.0
-                for face in edge.faces:
-                    depth_sync = max(depth_sync, self._resolve_roof_layer_top_depth(face.plane_info))
-                shift_z = depth_sync + ridge_depth / 2.0
-                
-                # Log applied offsets
-                offset_msg = "shift_z={:.3f} ft (depth_sync={:.3f} ft, ridge_depth={:.3f} ft)".format(shift_z, depth_sync, ridge_depth)
-                self._edge_lifecycle[edge_key]["offset_logged"] = offset_msg
-                
-                m.start_point = edge.node_a.pt - XYZ(0, 0, shift_z)
-                m.end_point = edge.node_b.pt - XYZ(0, 0, shift_z)
-                m.rotation = 0.0
-                m.disallow_end_joins = True
-                m.host_kind = roof_info.kind
-                m.host_id = roof_info.element_id
-                members.append(m)
-                self._edge_lifecycle[edge_key]["appended"] = "YES"
-                
-        try:
-            from pyrevit import script
-            script.get_output().print_md("- **Stick Frame: Ridge boards calculated:** {}".format(len(members)))
-        except Exception:
-            pass
-
-        # 4. Place Hip and Valley Rafters
-        for edge in graph.edges.values():
-            if edge.edge_type in ("HIP", "VALLEY"):
-                edge_key = (min(edge.node_a.key, edge.node_b.key), max(edge.node_a.key, edge.node_b.key))
-                
-                # Initialize lifecycle tracking
-                self._edge_lifecycle[edge_key] = {
-                    "type": edge.edge_type,
-                    "detected": "YES",
-                    "created": "NO",
-                    "appended": "NO",
-                    "sent_to_placement": "NO",
-                    "successfully_placed": "NO",
-                    "start": edge.node_a.pt,
-                    "end": edge.node_b.pt,
-                    "length": (edge.node_b.pt - edge.node_a.pt).GetLength(),
-                    "family_resolved": "None",
-                    "type_resolved": "None",
-                    "element_id": "None",
-                    "offset_logged": "None",
-                    "skip_reason": "None"
-                }
-
-                # Geometry Validation
-                length = (edge.node_b.pt - edge.node_a.pt).GetLength()
-                skip_reason = None
-                if length < MIN_MEMBER_LENGTH:
-                    skip_reason = "Below MIN_MEMBER_LENGTH ({:.3f} ft)".format(length)
-                elif edge.node_a.pt.DistanceTo(edge.node_b.pt) < 1e-4:
-                    skip_reason = "Start and End points are identical"
-                elif not is_finite_xyz(edge.node_a.pt) or not is_finite_xyz(edge.node_b.pt):
-                    skip_reason = "Non-finite coordinates detected"
-                    
-                if skip_reason is not None:
-                    self._edge_lifecycle[edge_key]["skip_reason"] = skip_reason
-                    try:
-                        from pyrevit import script
-                        script.get_output().print_md("> **Skipped {} edge**: length={:.3f} ft, reason: {}".format(edge.edge_type, length, skip_reason))
-                    except Exception:
-                        pass
-                    continue
-
-                m = FramingMember(FramingMember.HEADER, edge.node_a.pt, edge.node_b.pt)
-                m.member_type = "HIP_RAFTER" if edge.edge_type == "HIP" else "VALLEY_RAFTER"
-                m.family_name = ridge_family
-                m.type_name = ridge_type
-                m.edge_key = edge_key
-                self._edge_lifecycle[edge_key]["created"] = "YES"
-                
-                avg_normal = XYZ(0, 0, 0)
-                depth_sync = 0.0
-                for face in edge.faces:
-                    avg_normal = avg_normal + face.normal
-                    depth_sync = max(depth_sync, self._resolve_roof_layer_top_depth(face.plane_info))
-                if len(edge.faces) > 0:
-                    avg_normal = avg_normal.Multiply(1.0 / len(edge.faces)).Normalize()
-                else:
-                    avg_normal = XYZ(0, 0, 1)
-                    
-                shift = avg_normal.Multiply(depth_sync + ridge_depth / 2.0)
-                
-                # Log applied offsets
-                offset_msg = "shift vector=({:.3f}, {:.3f}, {:.3f}), avg_normal=({:.3f}, {:.3f}, {:.3f}), depth_sync={:.3f} ft".format(
-                    shift.X, shift.Y, shift.Z, avg_normal.X, avg_normal.Y, avg_normal.Z, depth_sync
-                )
-                self._edge_lifecycle[edge_key]["offset_logged"] = offset_msg
-                
-                m.start_point = edge.node_a.pt - shift
-                m.end_point = edge.node_b.pt - shift
-                
-                m.rotation = _rotation_from_up(edge.node_b.pt - edge.node_a.pt, avg_normal)
-                m.disallow_end_joins = True
-                m.host_kind = roof_info.kind
-                m.host_id = roof_info.element_id
-                members.append(m)
-                self._edge_lifecycle[edge_key]["appended"] = "YES"
-                
-        try:
-            from pyrevit import script
-            script.get_output().print_md("- **Stick Frame: Ridge + Hip/Valley rafters calculated:** {}".format(len(members)))
-        except Exception:
-            pass
+        # 3 & 4. Place Ridge Boards, Hip & Valley Rafters
+        ridge_hip_members, ridge_edges_for_ties = self._calc_ridges_hips_valleys(graph, roof_info)
+        members.extend(ridge_hip_members)
 
         # 5. Place Common and Jack Rafters
         for face in graph.faces:
@@ -1486,7 +1493,7 @@ class RoofFramingEngine(BaseFramingEngine):
             except Exception:
                 pass
                 
-        if ridge_edges_for_ties and bool(getattr(self.config, "include_ceiling_joists", True)):
+        if ridge_edges_for_ties and (bool(getattr(self.config, "include_ceiling_joists", True)) or bool(getattr(self.config, "include_king_posts", False))):
             try:
                 # `_make_ceiling_joists` expects: self, planes, ridge_edges, roof_info, spacing, include_kickers=True
                 members.extend(self._make_ceiling_joists(
@@ -1757,19 +1764,20 @@ class RoofFramingEngine(BaseFramingEngine):
                 joist_a = XYZ(foot_a.X, foot_a.Y, joist_z)
                 joist_b = XYZ(foot_b.X, foot_b.Y, joist_z)
 
-                if _dist(joist_a, joist_b) >= MIN_MEMBER_LENGTH:
-                    jkey = (_pt_key(joist_a), _pt_key(joist_b))
-                    jrkey = (_pt_key(joist_b), _pt_key(joist_a))
-                    if jkey not in joist_seen and jrkey not in joist_seen:
-                        joist_seen.add(jkey)
-                        m = FramingMember(FramingMember.HEADER, joist_a, joist_b)
-                        m.member_type = "CEILING_JOIST"
-                        m.family_name = self.config.stud_family_name
-                        m.type_name = self.config.stud_type_name
-                        m.rotation = 0.0  # on edge
-                        m.host_kind = roof_info.kind
-                        m.host_id = roof_info.element_id
-                        members.append(m)
+                if bool(getattr(self.config, "include_ceiling_joists", True)):
+                    if _dist(joist_a, joist_b) >= MIN_MEMBER_LENGTH:
+                        jkey = (_pt_key(joist_a), _pt_key(joist_b))
+                        jrkey = (_pt_key(joist_b), _pt_key(joist_a))
+                        if jkey not in joist_seen and jrkey not in joist_seen:
+                            joist_seen.add(jkey)
+                            m = FramingMember(FramingMember.HEADER, joist_a, joist_b)
+                            m.member_type = "CEILING_JOIST"
+                            m.family_name = self.config.stud_family_name
+                            m.type_name = self.config.stud_type_name
+                            m.rotation = 0.0  # on edge
+                            m.host_kind = roof_info.kind
+                            m.host_id = roof_info.element_id
+                            members.append(m)
 
                     if include_kickers:
                         rafter_pt_a = _lerp(foot_a, ridge_pt, KICKER_FRACTION)
@@ -1817,6 +1825,34 @@ class RoofFramingEngine(BaseFramingEngine):
                                 km.host_kind = roof_info.kind
                                 km.host_id = roof_info.element_id
                                 members.append(km)
+
+                if bool(getattr(self.config, "include_king_posts", False)):
+                    # Resolve depths
+                    ridge_family = self.config.header_family_name or self.config.stud_family_name
+                    ridge_type = self.config.header_type_name or self.config.stud_type_name
+                    _, ridge_depth = self._resolve_roof_member_size(ridge_family, ridge_type)
+                    if ridge_depth is None or ridge_depth <= 0.0:
+                        ridge_depth = 7.25 / 12.0
+                        
+                    depth_sync = max(self._resolve_roof_layer_top_depth(pa), self._resolve_roof_layer_top_depth(pb))
+                    
+                    post_start_z = joist_z + joist_depth / 2.0
+                    post_end_z = ridge_pt.Z - depth_sync - ridge_depth
+                    
+                    if post_end_z - post_start_z >= MIN_MEMBER_LENGTH:
+                        pt_bot = XYZ(ridge_pt.X, ridge_pt.Y, post_start_z)
+                        pt_top = XYZ(ridge_pt.X, ridge_pt.Y, post_end_z)
+                        
+                        m_post = FramingMember(FramingMember.STUD, pt_bot, pt_top)
+                        m_post.member_type = "KING_POST"
+                        m_post.family_name = self.config.stud_family_name
+                        m_post.type_name = self.config.stud_type_name
+                        m_post.is_column = True
+                        m_post.rotation = 0.0
+                        m_post.host_kind = roof_info.kind
+                        m_post.host_id = roof_info.element_id
+                        m_post.disallow_end_joins = True
+                        members.append(m_post)
 
                 d += spacing
 
@@ -2327,6 +2363,11 @@ class RoofFramingEngine(BaseFramingEngine):
             graph.print_diagnostics(total_unsnapped)
         except Exception:
             pass
+            
+        # Calculate and place Ridge Boards, Hip & Valley Rafters
+        self._edge_lifecycle = {}
+        ridge_hip_members, _ = self._calc_ridges_hips_valleys(graph, roof_info)
+        members.extend(ridge_hip_members)
         
         for face in graph.faces:
             layer_depth = self._resolve_roof_layer_top_depth(face.plane_info)

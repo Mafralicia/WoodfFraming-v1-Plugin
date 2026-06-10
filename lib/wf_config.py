@@ -110,6 +110,7 @@ class FramingConfig(object):
         self.include_collar_ties = True
         self.include_ceiling_joists = True
         self.include_roof_kickers = True
+        self.include_king_posts = False
         self.roof_edge_family_name = None
         self.roof_edge_type_name = None
 
@@ -161,6 +162,7 @@ class FramingConfig(object):
             "include_collar_ties": self.include_collar_ties,
             "include_ceiling_joists": self.include_ceiling_joists,
             "include_roof_kickers": self.include_roof_kickers,
+            "include_king_posts": self.include_king_posts,
             "roof_edge_family_name": self.roof_edge_family_name,
             "roof_edge_type_name": self.roof_edge_type_name,
             "track_members": self.track_members,
