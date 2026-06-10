@@ -1108,6 +1108,14 @@ class RoofFramingEngine(BaseFramingEngine):
         if not placed_instances:
             return
 
+        try:
+            from Autodesk.Revit.DB.Structure import StructuralFramingUtils
+        except ImportError:
+            StructuralFramingUtils = None
+
+        if StructuralFramingUtils is None:
+            return
+
         rafters = []
         boards = []
         member_pairs = getattr(self, "_last_placed_pairs", None) or []
@@ -1134,14 +1142,11 @@ class RoofFramingEngine(BaseFramingEngine):
             return
 
         for rafter in rafters:
-            add_coping = getattr(rafter, "AddCoping", None)
-            if add_coping is None:
-                continue
             for board in boards:
                 if not self._elements_are_near(rafter, board):
                     continue
                 try:
-                    add_coping(board)
+                    StructuralFramingUtils.AddCoping(self.doc, rafter, board)
                 except Exception:
                     pass
 

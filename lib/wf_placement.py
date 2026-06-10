@@ -181,15 +181,15 @@ class BaseFramingEngine(object):
             if symbol is not None:
                 return symbol
 
-            # Emit visible error if symbol cannot be resolved
+            # Emit visible warning if symbol cannot be resolved, but don't return None yet.
             try:
                 from pyrevit import script
                 script.get_output().print_md(
-                    "\n> ### **ERROR: Family/Type Resolution Failed**\n"
+                    "\n> ### **WARNING: Family/Type Resolution Failed**\n"
                     "> - **Member Type**: `{}`\n"
-                    "> - **Family**: `{}`\n"
-                    "> - **Type**: `{}`\n"
-                    "> - **Status**: Could not be resolved. Please verify the family is loaded and spelling matches exactly.".format(
+                    "> - **Requested Family**: `{}`\n"
+                    "> - **Requested Type**: `{}`\n"
+                    "> - **Status**: Could not be resolved. Will attempt to use configuration fallback or loaded framing types.".format(
                         getattr(member, "member_type", "UNKNOWN"),
                         member.family_name,
                         member.type_name
@@ -197,7 +197,6 @@ class BaseFramingEngine(object):
                 )
             except Exception:
                 pass
-            return None
 
         # 2. Fall back to config's stud family symbol
         if self.config.stud_family_name and self.config.stud_type_name:
@@ -208,6 +207,15 @@ class BaseFramingEngine(object):
                 primary_cat,
             )
             if symbol is not None:
+                try:
+                    from pyrevit import script
+                    script.get_output().print_md(
+                        "> - **Fallback**: Resolved to config stud family `{}` (type `{}`).".format(
+                            self.config.stud_family_name, self.config.stud_type_name
+                        )
+                    )
+                except Exception:
+                    pass
                 return symbol
             symbol = find_family_symbol(
                 self.doc,
@@ -216,6 +224,15 @@ class BaseFramingEngine(object):
                 fallback_cat,
             )
             if symbol is not None:
+                try:
+                    from pyrevit import script
+                    script.get_output().print_md(
+                        "> - **Fallback**: Resolved to config stud family `{}` (type `{}`).".format(
+                            self.config.stud_family_name, self.config.stud_type_name
+                        )
+                    )
+                except Exception:
+                    pass
                 return symbol
 
         # 3. Last resort fallback: find any structural framing symbol loaded in the document
@@ -223,6 +240,15 @@ class BaseFramingEngine(object):
         try:
             any_symbol = FilteredElementCollector(self.doc).OfCategory(primary_cat).OfClass(FamilySymbol).FirstElement()
             if any_symbol is not None:
+                try:
+                    from pyrevit import script
+                    script.get_output().print_md(
+                        "> - **Fallback**: Resolved to first loaded family symbol `{}` (type `{}`).".format(
+                            any_symbol.Family.Name, any_symbol.Name
+                        )
+                    )
+                except Exception:
+                    pass
                 return any_symbol
         except Exception:
             pass
@@ -230,7 +256,25 @@ class BaseFramingEngine(object):
         try:
             any_symbol = FilteredElementCollector(self.doc).OfCategory(fallback_cat).OfClass(FamilySymbol).FirstElement()
             if any_symbol is not None:
+                try:
+                    from pyrevit import script
+                    script.get_output().print_md(
+                        "> - **Fallback**: Resolved to first loaded fallback family symbol `{}` (type `{}`).".format(
+                            any_symbol.Family.Name, any_symbol.Name
+                        )
+                    )
+                except Exception:
+                    pass
                 return any_symbol
+        except Exception:
+            pass
+
+        try:
+            from pyrevit import script
+            script.get_output().print_md(
+                "\n> ### **ERROR: All Symbol Fallbacks Failed**\n"
+                "> - **Status**: No compatible structural framing or column family symbols could be found in the document."
+            )
         except Exception:
             pass
 
