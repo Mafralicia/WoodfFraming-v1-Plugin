@@ -115,6 +115,7 @@ class FramingConfig(object):
 
         # Generated-member ownership tracking
         self.track_members = True
+        self.debug_roof_topology = True
 
     @property
     def stud_spacing_ft(self):
@@ -163,6 +164,7 @@ class FramingConfig(object):
             "roof_edge_family_name": self.roof_edge_family_name,
             "roof_edge_type_name": self.roof_edge_type_name,
             "track_members": self.track_members,
+            "debug_roof_topology": self.debug_roof_topology,
         }
 
     @classmethod

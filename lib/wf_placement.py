@@ -181,6 +181,24 @@ class BaseFramingEngine(object):
             if symbol is not None:
                 return symbol
 
+            # Emit visible error if symbol cannot be resolved
+            try:
+                from pyrevit import script
+                script.get_output().print_md(
+                    "\n> ### **ERROR: Family/Type Resolution Failed**\n"
+                    "> - **Member Type**: `{}`\n"
+                    "> - **Family**: `{}`\n"
+                    "> - **Type**: `{}`\n"
+                    "> - **Status**: Could not be resolved. Please verify the family is loaded and spelling matches exactly.".format(
+                        getattr(member, "member_type", "UNKNOWN"),
+                        member.family_name,
+                        member.type_name
+                    )
+                )
+            except Exception:
+                pass
+            return None
+
         # 2. Fall back to config's stud family symbol
         if self.config.stud_family_name and self.config.stud_type_name:
             symbol = find_family_symbol(

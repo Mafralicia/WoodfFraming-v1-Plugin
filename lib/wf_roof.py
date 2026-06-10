@@ -798,18 +798,71 @@ class RoofTopologyGraph(object):
                         [f.index for f in edge.faces], edge.edge_type
                     ))
 
-            # Print details of the ridge and hip/valley edges
-            output.print_md("#### Classified Ridge & Hip Edges Details:")
+            # 1. Expanded Topology Diagnostics for EVERY edge
+            output.print_md("#### Detailed Edge Classification Details:")
+            for idx, edge in enumerate(self.edges.values()):
+                length = (edge.node_b.pt - edge.node_a.pt).GetLength()
+                output.print_md("- **Edge #{}**:\n"
+                                "  - **Type**: {}\n"
+                                "  - **Faces**: {}\n"
+                                "  - **Length**: {:.3f} ft\n"
+                                "  - **Start**: ({:.3f}, {:.3f}, {:.3f})\n"
+                                "  - **End**: ({:.3f}, {:.3f}, {:.3f})".format(
+                                    idx + 1,
+                                    edge.edge_type or "UNKNOWN",
+                                    [f.index for f in edge.faces],
+                                    length,
+                                    edge.node_a.pt.X, edge.node_a.pt.Y, edge.node_a.pt.Z,
+                                    edge.node_b.pt.X, edge.node_b.pt.Y, edge.node_b.pt.Z
+                                ))
+
+            # 8. Topology Consistency Checks
+            ridge_count = counts.get("RIDGE", 0)
+            hip_count = counts.get("HIP", 0)
+            
+            # Count convex sloped edges
+            convex_sloped_edges = 0
             for edge in self.edges.values():
-                if edge.edge_type in ("RIDGE", "HIP", "VALLEY"):
-                    length = (edge.node_b.pt - edge.node_a.pt).GetLength()
-                    output.print_md("  - **{}**: length={:.3f} ft, Node A=({:.3f}, {:.3f}, {:.3f}), Node B=({:.3f}, {:.3f}, {:.3f})".format(
-                        edge.edge_type, length,
-                        edge.node_a.pt.X, edge.node_a.pt.Y, edge.node_a.pt.Z,
-                        edge.node_b.pt.X, edge.node_b.pt.Y, edge.node_b.pt.Z
-                    ))
-        except Exception:
-            pass
+                if len(edge.faces) == 2:
+                    edge_vec = edge.node_b.pt - edge.node_a.pt
+                    edge_len = edge_vec.GetLength()
+                    if edge_len > 1e-4:
+                        z_diff = abs(edge.node_a.pt.Z - edge.node_b.pt.Z)
+                        edge_slope = z_diff / edge_len
+                        if edge_slope >= 0.15 and z_diff >= 0.25:
+                            # Convex check using half-space test
+                            face_list = list(edge.faces)
+                            fa, fb = face_list[0], face_list[1]
+                            pt_in_fa = None
+                            for loop in fa.loops_nodes:
+                                for n in loop:
+                                    if n.key != edge.node_a.key and n.key != edge.node_b.key:
+                                        vec = n.pt - edge.node_a.pt
+                                        cross = vec.CrossProduct(edge_vec)
+                                        if cross.GetLength() > 1e-4:
+                                            pt_in_fa = n.pt
+                                            break
+                                if pt_in_fa:
+                                    break
+                            if pt_in_fa is not None:
+                                dist = fb.normal.DotProduct(pt_in_fa) + fb.d
+                                if dist <= 0.001:
+                                    convex_sloped_edges += 1
+
+            if len(self.faces) >= 2 and ridge_count == 0:
+                output.print_md("\n> ### **ERROR**\n"
+                                "> **Multi-plane roof detected but no ridge edges were generated.**\n")
+                                
+            if convex_sloped_edges > 0 and hip_count == 0:
+                output.print_md("\n> ### **ERROR**\n"
+                                "> **Convex sloped roof intersections detected but no hip edges generated.**\n")
+
+        except Exception as e:
+            try:
+                from pyrevit import script
+                script.get_output().print_md("> **Diagnostics Error**: {}".format(e))
+            except Exception:
+                pass
 
 
 # ======================================================================
@@ -831,6 +884,13 @@ class RoofFramingEngine(BaseFramingEngine):
 
     def place_members(self, members, host_info):
         """Place roof members and apply roof-specific post-processing."""
+        # 1. Trace lifecycle: sent_to_placement
+        lifecycle = getattr(self, "_edge_lifecycle", {})
+        for m in members:
+            edge_key = getattr(m, "edge_key", None)
+            if edge_key and edge_key in lifecycle:
+                lifecycle[edge_key]["sent_to_placement"] = "YES"
+
         try:
             from pyrevit import script
             output = script.get_output()
@@ -858,27 +918,85 @@ class RoofFramingEngine(BaseFramingEngine):
 
         placed = BaseFramingEngine.place_members(self, members, host_info)
 
+        # 2. Trace lifecycle: successfully_placed & resolve details
+        try:
+            member_pairs = getattr(self, "_last_placed_pairs", None) or []
+            for member, instance in member_pairs:
+                edge_key = getattr(member, "edge_key", None)
+                if edge_key and edge_key in lifecycle:
+                    if instance is not None:
+                        lifecycle[edge_key]["successfully_placed"] = "YES"
+                        lifecycle[edge_key]["element_id"] = str(instance.Id.Value)
+                        lifecycle[edge_key]["family_resolved"] = member.family_name
+                        lifecycle[edge_key]["type_resolved"] = member.type_name
+        except Exception as trace_err:
+            try:
+                from pyrevit import script
+                script.get_output().print_md("> **Error tracing placed members:** {}".format(trace_err))
+            except Exception:
+                pass
+
+        # 3. Print summaries
         try:
             from pyrevit import script
             output = script.get_output()
-            output.print_md("- **Total members placed by BaseFramingEngine:** {}".format(len(placed)))
             
-            # Print the IDs of the placed RIDGE_BOARD / HIP_RAFTER
-            member_pairs = getattr(self, "_last_placed_pairs", None) or []
-            if member_pairs:
-                for member, instance in member_pairs:
-                    mtype = getattr(member, "member_type", "UNKNOWN")
-                    if mtype in ("RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER"):
-                        output.print_md("  - **Placed {} (ID: {})**: Start=({:.3f}, {:.3f}, {:.3f}), End=({:.3f}, {:.3f}, {:.3f})".format(
-                            mtype, instance.Id.Value, member.start_point.X, member.start_point.Y, member.start_point.Z,
-                            member.end_point.X, member.end_point.Y, member.end_point.Z
-                        ))
-        except Exception as debug_err:
+            # Placement Summary
+            ridge_calc = sum(1 for k, v in lifecycle.items() if v["type"] == "RIDGE" and v["created"] == "YES")
+            ridge_placed = sum(1 for k, v in lifecycle.items() if v["type"] == "RIDGE" and v["successfully_placed"] == "YES")
+            hip_calc = sum(1 for k, v in lifecycle.items() if v["type"] == "HIP" and v["created"] == "YES")
+            hip_placed = sum(1 for k, v in lifecycle.items() if v["type"] == "HIP" and v["successfully_placed"] == "YES")
+            valley_calc = sum(1 for k, v in lifecycle.items() if v["type"] == "VALLEY" and v["created"] == "YES")
+            valley_placed = sum(1 for k, v in lifecycle.items() if v["type"] == "VALLEY" and v["successfully_placed"] == "YES")
+            
+            output.print_md("### RIDGE & HIP PLACEMENT SUMMARY")
+            output.print_md("- **Ridge Boards**: calculated={}, placed={}".format(ridge_calc, ridge_placed))
+            output.print_md("- **Hip Rafters**: calculated={}, placed={}".format(hip_calc, hip_placed))
+            output.print_md("- **Valley Rafters**: calculated={}, placed={}".format(valley_calc, valley_placed))
+            
+            # Lifecycle Summary
+            output.print_md("### RIDGE & HIP LIFECYCLE SUMMARY")
+            for edge_key, info in sorted(lifecycle.items(), key=lambda x: x[1]["type"]):
+                output.print_md(
+                    "#### **{} #{}**\n"
+                    "- **Length**: {:.3f} ft\n"
+                    "- **Start**: ({:.3f}, {:.3f}, {:.3f})\n"
+                    "- **End**: ({:.3f}, {:.3f}, {:.3f})\n"
+                    "- **Classified/Detected**: {}\n"
+                    "- **Created**: {}\n"
+                    "- **Appended**: {}\n"
+                    "- **Sent To Placement**: {}\n"
+                    "- **Placement Success**: {}\n"
+                    "- **Revit Element ID**: {}\n"
+                    "- **Family/Type**: {} / {}\n"
+                    "- **Offsets Logged**: {}\n"
+                    "- **Skip Reason**: {}".format(
+                        info["type"], edge_key[0], info["length"],
+                        info["start"].X, info["start"].Y, info["start"].Z,
+                        info["end"].X, info["end"].Y, info["end"].Z,
+                        info["detected"], info["created"], info["appended"],
+                        info["sent_to_placement"], info["successfully_placed"],
+                        info["element_id"], info["family_resolved"], info["type_resolved"],
+                        info["offset_logged"], info["skip_reason"]
+                    )
+                )
+        except Exception as summary_err:
             try:
                 from pyrevit import script
-                script.get_output().print_md("> **Debug Error after placement:** {}".format(debug_err))
+                script.get_output().print_md("> **Error printing summaries:** {}".format(summary_err))
             except Exception:
                 pass
+
+        # 4. Optional Topology Debug Geometry (ModelLines)
+        if getattr(self.config, "debug_roof_topology", True):
+            try:
+                self._create_debug_model_lines(members)
+            except Exception as debug_geom_err:
+                try:
+                    from pyrevit import script
+                    script.get_output().print_md("> **Failed to draw debug lines**: {}".format(debug_geom_err))
+                except Exception:
+                    pass
 
         try:
             self._set_coping_distance_zero(placed)
@@ -897,6 +1015,55 @@ class RoofFramingEngine(BaseFramingEngine):
             pass
 
         return placed
+
+    def _create_debug_model_lines(self, members):
+        """Create temporary Revit ModelLines for RIDGE, HIP, and VALLEY edges."""
+        from Autodesk.Revit.DB import Plane, SketchPlane, XYZ, Line
+        
+        # Keep track of what we draw so we don't draw duplicates
+        drawn_keys = set()
+        
+        for m in members:
+            mtype = getattr(m, "member_type", "UNKNOWN")
+            if mtype in ("RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER"):
+                edge_key = getattr(m, "edge_key", None)
+                if edge_key:
+                    if edge_key in drawn_keys:
+                        continue
+                    drawn_keys.add(edge_key)
+                    
+                start = m.start_point
+                end = m.end_point
+                length = (end - start).GetLength()
+                if length < 0.1:
+                    continue
+                    
+                try:
+                    line = Line.CreateBound(start, end)
+                    
+                    # Determine normal of plane to create SketchPlane
+                    direction = (end - start).Normalize()
+                    ref_up = XYZ.BasisZ
+                    if abs(direction.DotProduct(ref_up)) > 0.99:
+                        ref_up = XYZ.BasisX
+                        
+                    plane_normal = direction.CrossProduct(ref_up).Normalize()
+                    plane = Plane.CreateByNormalAndOrigin(plane_normal, start)
+                    sketch_plane = SketchPlane.Create(self.doc, plane)
+                    
+                    # Create the ModelLine (NewModelCurve)
+                    self.doc.Create.NewModelCurve(line, sketch_plane)
+                    
+                    from pyrevit import script
+                    script.get_output().print_md("> **Created Debug ModelLine** for `{}`: length={:.3f} ft, start=({:.3f}, {:.3f}, {:.3f}), end=({:.3f}, {:.3f}, {:.3f})".format(
+                        mtype, length, start.X, start.Y, start.Z, end.X, end.Y, end.Z
+                    ))
+                except Exception as err:
+                    try:
+                        from pyrevit import script
+                        script.get_output().print_md("> **Failed to create debug line** for `{}`: {}".format(mtype, err))
+                    except Exception:
+                        pass
 
     @staticmethod
     def _set_coping_distance_zero(instances):
@@ -1008,6 +1175,14 @@ class RoofFramingEngine(BaseFramingEngine):
         if spacing <= 0:
             return members
             
+        # Initialize edge lifecycle tracking
+        self._edge_lifecycle = {}
+        
+        def is_finite_xyz(pt):
+            return (not math.isnan(pt.X) and not math.isinf(pt.X) and
+                    not math.isnan(pt.Y) and not math.isinf(pt.Y) and
+                    not math.isnan(pt.Z) and not math.isinf(pt.Z))
+            
         # 1. Build and solve topology graph
         graph = RoofTopologyGraph(planes)
         graph.solve_geometry()
@@ -1043,24 +1218,70 @@ class RoofFramingEngine(BaseFramingEngine):
         ridge_edges_for_ties = []
         for edge in graph.edges.values():
             if edge.edge_type == "RIDGE":
-                key = (min(edge.node_a.key, edge.node_b.key), max(edge.node_a.key, edge.node_b.key))
-                if key in ridge_seen:
+                edge_key = (min(edge.node_a.key, edge.node_b.key), max(edge.node_a.key, edge.node_b.key))
+                
+                # Initialize lifecycle tracking
+                self._edge_lifecycle[edge_key] = {
+                    "type": "RIDGE",
+                    "detected": "YES",
+                    "created": "NO",
+                    "appended": "NO",
+                    "sent_to_placement": "NO",
+                    "successfully_placed": "NO",
+                    "start": edge.node_a.pt,
+                    "end": edge.node_b.pt,
+                    "length": (edge.node_b.pt - edge.node_a.pt).GetLength(),
+                    "family_resolved": "None",
+                    "type_resolved": "None",
+                    "element_id": "None",
+                    "offset_logged": "None",
+                    "skip_reason": "None"
+                }
+
+                if edge_key in ridge_seen:
+                    self._edge_lifecycle[edge_key]["skip_reason"] = "Duplicate ridge edge"
                     continue
-                ridge_seen.add(key)
+                ridge_seen.add(edge_key)
                 
                 faces = list(edge.faces)
                 if len(faces) >= 2:
                     ridge_edges_for_ties.append((edge.node_a.pt, edge.node_b.pt, faces[0].plane_info, faces[1].plane_info))
                 
+                # Geometry Validation
+                length = (edge.node_b.pt - edge.node_a.pt).GetLength()
+                skip_reason = None
+                if length < MIN_MEMBER_LENGTH:
+                    skip_reason = "Below MIN_MEMBER_LENGTH ({:.3f} ft)".format(length)
+                elif edge.node_a.pt.DistanceTo(edge.node_b.pt) < 1e-4:
+                    skip_reason = "Start and End points are identical"
+                elif not is_finite_xyz(edge.node_a.pt) or not is_finite_xyz(edge.node_b.pt):
+                    skip_reason = "Non-finite coordinates detected"
+                    
+                if skip_reason is not None:
+                    self._edge_lifecycle[edge_key]["skip_reason"] = skip_reason
+                    try:
+                        from pyrevit import script
+                        script.get_output().print_md("> **Skipped RIDGE edge**: length={:.3f} ft, reason: {}".format(length, skip_reason))
+                    except Exception:
+                        pass
+                    continue
+
                 m = FramingMember(FramingMember.HEADER, edge.node_a.pt, edge.node_b.pt)
                 m.member_type = "RIDGE_BOARD"
                 m.family_name = ridge_family
                 m.type_name = ridge_type
+                m.edge_key = edge_key
+                self._edge_lifecycle[edge_key]["created"] = "YES"
                 
                 depth_sync = 0.0
                 for face in edge.faces:
                     depth_sync = max(depth_sync, self._resolve_roof_layer_top_depth(face.plane_info))
                 shift_z = depth_sync + ridge_depth / 2.0
+                
+                # Log applied offsets
+                offset_msg = "shift_z={:.3f} ft (depth_sync={:.3f} ft, ridge_depth={:.3f} ft)".format(shift_z, depth_sync, ridge_depth)
+                self._edge_lifecycle[edge_key]["offset_logged"] = offset_msg
+                
                 m.start_point = edge.node_a.pt - XYZ(0, 0, shift_z)
                 m.end_point = edge.node_b.pt - XYZ(0, 0, shift_z)
                 m.rotation = 0.0
@@ -1068,6 +1289,7 @@ class RoofFramingEngine(BaseFramingEngine):
                 m.host_kind = roof_info.kind
                 m.host_id = roof_info.element_id
                 members.append(m)
+                self._edge_lifecycle[edge_key]["appended"] = "YES"
                 
         try:
             from pyrevit import script
@@ -1078,10 +1300,51 @@ class RoofFramingEngine(BaseFramingEngine):
         # 4. Place Hip and Valley Rafters
         for edge in graph.edges.values():
             if edge.edge_type in ("HIP", "VALLEY"):
+                edge_key = (min(edge.node_a.key, edge.node_b.key), max(edge.node_a.key, edge.node_b.key))
+                
+                # Initialize lifecycle tracking
+                self._edge_lifecycle[edge_key] = {
+                    "type": edge.edge_type,
+                    "detected": "YES",
+                    "created": "NO",
+                    "appended": "NO",
+                    "sent_to_placement": "NO",
+                    "successfully_placed": "NO",
+                    "start": edge.node_a.pt,
+                    "end": edge.node_b.pt,
+                    "length": (edge.node_b.pt - edge.node_a.pt).GetLength(),
+                    "family_resolved": "None",
+                    "type_resolved": "None",
+                    "element_id": "None",
+                    "offset_logged": "None",
+                    "skip_reason": "None"
+                }
+
+                # Geometry Validation
+                length = (edge.node_b.pt - edge.node_a.pt).GetLength()
+                skip_reason = None
+                if length < MIN_MEMBER_LENGTH:
+                    skip_reason = "Below MIN_MEMBER_LENGTH ({:.3f} ft)".format(length)
+                elif edge.node_a.pt.DistanceTo(edge.node_b.pt) < 1e-4:
+                    skip_reason = "Start and End points are identical"
+                elif not is_finite_xyz(edge.node_a.pt) or not is_finite_xyz(edge.node_b.pt):
+                    skip_reason = "Non-finite coordinates detected"
+                    
+                if skip_reason is not None:
+                    self._edge_lifecycle[edge_key]["skip_reason"] = skip_reason
+                    try:
+                        from pyrevit import script
+                        script.get_output().print_md("> **Skipped {} edge**: length={:.3f} ft, reason: {}".format(edge.edge_type, length, skip_reason))
+                    except Exception:
+                        pass
+                    continue
+
                 m = FramingMember(FramingMember.HEADER, edge.node_a.pt, edge.node_b.pt)
                 m.member_type = "HIP_RAFTER" if edge.edge_type == "HIP" else "VALLEY_RAFTER"
                 m.family_name = ridge_family
                 m.type_name = ridge_type
+                m.edge_key = edge_key
+                self._edge_lifecycle[edge_key]["created"] = "YES"
                 
                 avg_normal = XYZ(0, 0, 0)
                 depth_sync = 0.0
@@ -1094,6 +1357,13 @@ class RoofFramingEngine(BaseFramingEngine):
                     avg_normal = XYZ(0, 0, 1)
                     
                 shift = avg_normal.Multiply(depth_sync + ridge_depth / 2.0)
+                
+                # Log applied offsets
+                offset_msg = "shift vector=({:.3f}, {:.3f}, {:.3f}), avg_normal=({:.3f}, {:.3f}, {:.3f}), depth_sync={:.3f} ft".format(
+                    shift.X, shift.Y, shift.Z, avg_normal.X, avg_normal.Y, avg_normal.Z, depth_sync
+                )
+                self._edge_lifecycle[edge_key]["offset_logged"] = offset_msg
+                
                 m.start_point = edge.node_a.pt - shift
                 m.end_point = edge.node_b.pt - shift
                 
@@ -1102,6 +1372,7 @@ class RoofFramingEngine(BaseFramingEngine):
                 m.host_kind = roof_info.kind
                 m.host_id = roof_info.element_id
                 members.append(m)
+                self._edge_lifecycle[edge_key]["appended"] = "YES"
                 
         try:
             from pyrevit import script
