@@ -2397,9 +2397,50 @@ class RoofFramingEngine(BaseFramingEngine):
         proj_vals = [node.pt.DotProduct(slice_normal) for node in graph.nodes.values()]
         if not proj_vals:
             return members
-        t_min = min(proj_vals)
-        t_max = max(proj_vals)
+        roof_min = min(proj_vals)
+        roof_max = max(proj_vals)
         
+        support_ts = []
+        for wall in walls:
+            try:
+                loc = wall.Location
+                if loc is not None and getattr(loc, "Curve", None) is not None:
+                    curve = loc.Curve
+                    support_ts.append(curve.GetEndPoint(0).DotProduct(slice_normal))
+                    support_ts.append(curve.GetEndPoint(1).DotProduct(slice_normal))
+            except Exception:
+                pass
+        for beam in beams:
+            try:
+                loc = beam.Location
+                if loc is not None and getattr(loc, "Curve", None) is not None:
+                    curve = loc.Curve
+                    support_ts.append(curve.GetEndPoint(0).DotProduct(slice_normal))
+                    support_ts.append(curve.GetEndPoint(1).DotProduct(slice_normal))
+            except Exception:
+                pass
+                
+        if support_ts:
+            t_min = max(min(support_ts), roof_min)
+            t_max = min(max(support_ts), roof_max)
+            # If support range is too small/degenerate, fallback
+            if t_max - t_min < 2.0:
+                t_min = roof_min
+                t_max = roof_max
+                try:
+                    from pyrevit import script
+                    script.get_output().print_md("> **Warning:** Support range was too narrow. Falling back to full roof bounds.")
+                except Exception:
+                    pass
+        else:
+            t_min = roof_min
+            t_max = roof_max
+            try:
+                from pyrevit import script
+                script.get_output().print_md("> **Warning:** No support walls/beams found along slice normal. Falling back to full roof bounds.")
+            except Exception:
+                pass
+                
         span_len = t_max - t_min
         num_trusses = int(math.ceil(span_len / truss_spacing)) if truss_spacing > 0 else 1
         num_trusses = max(1, num_trusses)
@@ -2532,6 +2573,36 @@ class RoofFramingEngine(BaseFramingEngine):
                     filtered_nodes.append(p_curr)
             filtered_nodes.append(profile_nodes[-1])
             
+            # Phase 4 - Validate Profile Generation Near Roof Cuts
+            is_valid_profile = True
+            for idx in range(len(filtered_nodes) - 1):
+                if filtered_nodes[idx]["x"] >= filtered_nodes[idx+1]["x"] - 1e-4:
+                    is_valid_profile = False
+                    break
+                    
+            for idx in range(len(filtered_nodes) - 1):
+                dx = filtered_nodes[idx+1]["x"] - filtered_nodes[idx]["x"]
+                dz = filtered_nodes[idx+1]["z"] - filtered_nodes[idx]["z"]
+                if dx > 0:
+                    slope = abs(dz / dx)
+                    if slope > 5.0:
+                        is_valid_profile = False
+                        break
+                        
+            roof_base_z = self._get_roof_base_elevation(roof_info)
+            for n in filtered_nodes:
+                if n["z"] < roof_base_z - 20.0 or n["z"] > roof_base_z + 100.0:
+                    is_valid_profile = False
+                    break
+                    
+            if not is_valid_profile:
+                try:
+                    from pyrevit import script
+                    script.get_output().print_md("> **Warning:** Invalid profile geometry detected at station {0:.3f} ft. Skipping truss generation.".format(t_station))
+                except Exception:
+                    pass
+                continue
+            
             for i in range(len(filtered_nodes)-1):
                 n1 = filtered_nodes[i]
                 n2 = filtered_nodes[i+1]
@@ -2622,6 +2693,26 @@ class RoofFramingEngine(BaseFramingEngine):
                 
             highest_node = max(filtered_nodes, key=lambda n: n["z"])
 
+            # Phase 1 - Diagnostic Instrumentation
+            try:
+                from pyrevit import script
+                output = script.get_output()
+                support_xs = [(pt - slice_origin).DotProduct(truss_dir) for pt in intersections_support]
+                sup_min_str = "{0:.3f}".format(min(support_xs)) if support_xs else "None"
+                sup_max_str = "{0:.3f}".format(max(support_xs)) if support_xs else "None"
+                
+                output.print_md("### Truss Debug")
+                output.print_md("- **Station:** {0:.3f} ft".format(t_station))
+                output.print_md("- **Roof Bounds (Local):** {0:.3f} -> {1:.3f} ft".format(heel_x_L, heel_x_R))
+                output.print_md("- **Support Bounds (Local):** {0} -> {1} ft".format(sup_min_str, sup_max_str))
+                output.print_md("- **Profile Points:**")
+                for n in filtered_nodes:
+                    output.print_md("  - ({0:.3f}, {1:.3f})".format(n["x"], n["z"]))
+                output.print_md("- **Segments:** {0}".format(len(segments)))
+                output.print_md("- **Ridge Location (Local):** {0:.3f}".format(king_x))
+            except Exception:
+                pass
+
             def get_top_z(x):
                 best_z_val = -1e9
                 for s in segments:
@@ -2631,15 +2722,13 @@ class RoofFramingEngine(BaseFramingEngine):
                             best_z_val = z_val
                 if best_z_val > -1e8:
                     return best_z_val
-                # Fallback to linear interpolation of heel and apex if out of bounds
-                if x <= king_x:
-                    if abs(king_x - heel_x_L) > 1e-5:
-                        t = (x - heel_x_L) / (king_x - heel_x_L)
-                        return profile_nodes[0]["z"] + t * (highest_node["z"] - profile_nodes[0]["z"])
-                else:
-                    if abs(heel_x_R - king_x) > 1e-5:
-                        t = (x - king_x) / (heel_x_R - king_x)
-                        return highest_node["z"] + t * (profile_nodes[-1]["z"] - highest_node["z"])
+                # Fallback: extrapolate using the nearest boundary segment
+                if not segments:
+                    return highest_node["z"]
+                if x < segments[0]["x_min"]:
+                    return segments[0]["A"] * x + segments[0]["B"]
+                elif x > segments[-1]["x_max"]:
+                    return segments[-1]["A"] * x + segments[-1]["B"]
                 return highest_node["z"]
 
             def add_web(pt_start, pt_end, mtype="WEB_BRACING"):
@@ -2673,7 +2762,7 @@ class RoofFramingEngine(BaseFramingEngine):
             if truss_type_to_build == "KingPost":
                 # Vertical King Post in the center
                 pt_bot = slice_origin + truss_dir.Multiply(king_x) + XYZ.BasisZ.Multiply(y_bc)
-                pt_top = slice_origin + truss_dir.Multiply(king_x) + XYZ.BasisZ.Multiply(highest_node["z"])
+                pt_top = slice_origin + truss_dir.Multiply(king_x) + XYZ.BasisZ.Multiply(get_top_z(king_x))
                 add_web(pt_bot, pt_top, "KING_POST")
                 
                 # Left diagonal strut: bottom center to left rafter midpoint
@@ -2721,7 +2810,7 @@ class RoofFramingEngine(BaseFramingEngine):
             # 3. Pratt Truss Topology
             elif truss_type_to_build == "Pratt":
                 pt_bot_ctr = slice_origin + truss_dir.Multiply(king_x) + XYZ.BasisZ.Multiply(y_bc)
-                pt_top_ctr = slice_origin + truss_dir.Multiply(king_x) + XYZ.BasisZ.Multiply(highest_node["z"])
+                pt_top_ctr = slice_origin + truss_dir.Multiply(king_x) + XYZ.BasisZ.Multiply(get_top_z(king_x))
                 
                 # Center vertical King Post
                 add_web(pt_bot_ctr, pt_top_ctr, "KING_POST")
@@ -2758,7 +2847,7 @@ class RoofFramingEngine(BaseFramingEngine):
                 pt_bot_heel_R = slice_origin + truss_dir.Multiply(heel_x_R) + XYZ.BasisZ.Multiply(y_bc)
                 add_web(pt_bot_heel_R, pt_top_R2, "WEB_BRACING")
                 add_web(pt_bot_R2, pt_top_R1, "WEB_BRACING")
-                add_web(pt_top_R1, pt_bot_ctr, "WEB_BRACING")
+                add_web(pt_bot_R1, pt_top_ctr, "WEB_BRACING")
                     
         # 4. Generate continuous horizontal purlins on top of trusses!
         try:
