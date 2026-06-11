@@ -1392,6 +1392,13 @@ class RoofFramingEngine(BaseFramingEngine):
         ridge_hip_members, ridge_edges_for_ties = self._calc_ridges_hips_valleys(graph, roof_info)
         members.extend(ridge_hip_members)
 
+        # Resolve ridge width for rafter cutbacks
+        ridge_family = self.config.header_family_name or self.config.stud_family_name
+        ridge_type = self.config.header_type_name or self.config.stud_type_name
+        ridge_width, _ = self._resolve_roof_member_size(ridge_family, ridge_type)
+        if ridge_width is None or ridge_width <= 0.0:
+            ridge_width = 1.5 / 12.0
+
         # 5. Place Common and Jack Rafters
         for face in graph.faces:
             local_loops = []
@@ -2579,49 +2586,147 @@ class RoofFramingEngine(BaseFramingEngine):
             m_bc.disallow_end_joins = True
             members.append(m_bc)
             
+            # Web Bracing Generation based on selected Truss Type
             highest_node = max(filtered_nodes, key=lambda n: n["z"])
             king_x = highest_node["x"]
-            
-            web_spacing_in = getattr(self.config, 'web_spacing', 48.0)
-            web_spacing = web_spacing_in / 12.0
-            if web_spacing <= 0:
-                web_spacing = 4.0
-                
-            web_x_vals = []
-            
-            curr_x = king_x - web_spacing
-            while curr_x > heel_x_L + 0.5:
-                web_x_vals.append(curr_x)
-                curr_x -= web_spacing
-                
-            if heel_x_L - 1e-3 <= king_x <= heel_x_R + 1e-3:
-                web_x_vals.append(king_x)
-                
-            curr_x = king_x + web_spacing
-            while curr_x < heel_x_R - 0.5:
-                web_x_vals.append(curr_x)
-                curr_x += web_spacing
-                
-            for w_x in web_x_vals:
-                best_z = -1e9
+
+            def get_top_z(x):
+                best_z_val = -1e9
                 for s in segments:
-                    if s["x_min"] - 1e-3 <= w_x <= s["x_max"] + 1e-3:
-                        z_val = s["A"] * w_x + s["B"]
-                        if z_val > best_z:
-                            best_z = z_val
-                            
-                if best_z > y_bc + MIN_MEMBER_LENGTH:
-                    pt_top = slice_origin + truss_dir.Multiply(w_x) + XYZ.BasisZ.Multiply(best_z)
-                    pt_bot = slice_origin + truss_dir.Multiply(w_x) + XYZ.BasisZ.Multiply(y_bc)
-                    m_web = FramingMember(FramingMember.STUD, pt_bot, pt_top)
-                    m_web.member_type = "WEB_BRACING"
-                    m_web.family_name = family_web[0]
-                    m_web.type_name = family_web[1]
-                    m_web.rotation = _rotation_from_up(pt_top - pt_bot, XYZ.BasisZ)
-                    m_web.host_kind = roof_info.kind
-                    m_web.host_id = roof_info.element_id
-                    m_web.disallow_end_joins = True
-                    members.append(m_web)
+                    if s["x_min"] - 1e-3 <= x <= s["x_max"] + 1e-3:
+                        z_val = s["A"] * x + s["B"]
+                        if z_val > best_z_val:
+                            best_z_val = z_val
+                if best_z_val > -1e8:
+                    return best_z_val
+                # Fallback to linear interpolation of heel and apex if out of bounds
+                if x <= king_x:
+                    if abs(king_x - heel_x_L) > 1e-5:
+                        t = (x - heel_x_L) / (king_x - heel_x_L)
+                        return profile_nodes[0]["z"] + t * (highest_node["z"] - profile_nodes[0]["z"])
+                else:
+                    if abs(heel_x_R - king_x) > 1e-5:
+                        t = (x - king_x) / (heel_x_R - king_x)
+                        return highest_node["z"] + t * (profile_nodes[-1]["z"] - highest_node["z"])
+                return highest_node["z"]
+
+            def add_web(pt_start, pt_end, mtype="WEB_BRACING"):
+                if (pt_end - pt_start).GetLength() < MIN_MEMBER_LENGTH:
+                    return
+                m_web = FramingMember(FramingMember.STUD, pt_start, pt_end)
+                m_web.member_type = mtype
+                m_web.family_name = family_web[0]
+                m_web.type_name = family_web[1]
+                m_web.rotation = _rotation_from_up(pt_end - pt_start, XYZ.BasisZ)
+                m_web.host_kind = roof_info.kind
+                m_web.host_id = roof_info.element_id
+                m_web.disallow_end_joins = True
+                members.append(m_web)
+
+            selected_truss_type = getattr(self.config, 'truss_type', 'Dynamic')
+            span = abs(heel_x_R - heel_x_L)
+            
+            # Determine dynamic layout if set to Dynamic
+            if selected_truss_type == "Dynamic":
+                if span < 16.0:
+                    truss_type_to_build = "KingPost"
+                elif span < 28.0:
+                    truss_type_to_build = "Fink"
+                else:
+                    truss_type_to_build = "Pratt"
+            else:
+                truss_type_to_build = selected_truss_type
+
+            # 1. King Post Truss Topology
+            if truss_type_to_build == "KingPost":
+                # Vertical King Post in the center
+                pt_bot = slice_origin + truss_dir.Multiply(king_x) + XYZ.BasisZ.Multiply(y_bc)
+                pt_top = slice_origin + truss_dir.Multiply(king_x) + XYZ.BasisZ.Multiply(highest_node["z"])
+                add_web(pt_bot, pt_top, "KING_POST")
+                
+                # Left diagonal strut: bottom center to left rafter midpoint
+                x_mid_L = heel_x_L + (king_x - heel_x_L) * 0.5
+                z_mid_L = get_top_z(x_mid_L)
+                pt_mid_L = slice_origin + truss_dir.Multiply(x_mid_L) + XYZ.BasisZ.Multiply(z_mid_L)
+                add_web(pt_bot, pt_mid_L, "WEB_BRACING")
+                
+                # Right diagonal strut: bottom center to right rafter midpoint
+                x_mid_R = king_x + (heel_x_R - king_x) * 0.5
+                z_mid_R = get_top_z(x_mid_R)
+                pt_mid_R = slice_origin + truss_dir.Multiply(x_mid_R) + XYZ.BasisZ.Multiply(z_mid_R)
+                add_web(pt_bot, pt_mid_R, "WEB_BRACING")
+
+            # 2. Fink Truss (W-Truss) Topology
+            elif truss_type_to_build == "Fink":
+                pt_bot_ctr = slice_origin + truss_dir.Multiply(king_x) + XYZ.BasisZ.Multiply(y_bc)
+                
+                # Left side
+                x_bot_L = heel_x_L + (king_x - heel_x_L) * 0.5
+                x_top_L1 = heel_x_L + (king_x - heel_x_L) * 0.33
+                x_top_L2 = heel_x_L + (king_x - heel_x_L) * 0.67
+                
+                pt_bot_L = slice_origin + truss_dir.Multiply(x_bot_L) + XYZ.BasisZ.Multiply(y_bc)
+                pt_top_L1 = slice_origin + truss_dir.Multiply(x_top_L1) + XYZ.BasisZ.Multiply(get_top_z(x_top_L1))
+                pt_top_L2 = slice_origin + truss_dir.Multiply(x_top_L2) + XYZ.BasisZ.Multiply(get_top_z(x_top_L2))
+                
+                add_web(pt_top_L1, pt_bot_L, "WEB_BRACING")
+                add_web(pt_bot_L, pt_top_L2, "WEB_BRACING")
+                add_web(pt_top_L2, pt_bot_ctr, "WEB_BRACING")
+                
+                # Right side
+                x_bot_R = king_x + (heel_x_R - king_x) * 0.5
+                x_top_R1 = king_x + (heel_x_R - king_x) * 0.33
+                x_top_R2 = king_x + (heel_x_R - king_x) * 0.67
+                
+                pt_bot_R = slice_origin + truss_dir.Multiply(x_bot_R) + XYZ.BasisZ.Multiply(y_bc)
+                pt_top_R1 = slice_origin + truss_dir.Multiply(x_top_R1) + XYZ.BasisZ.Multiply(get_top_z(x_top_R1))
+                pt_top_R2 = slice_origin + truss_dir.Multiply(x_top_R2) + XYZ.BasisZ.Multiply(get_top_z(x_top_R2))
+                
+                add_web(pt_top_R2, pt_bot_R, "WEB_BRACING")
+                add_web(pt_bot_R, pt_top_R1, "WEB_BRACING")
+                add_web(pt_top_R1, pt_bot_ctr, "WEB_BRACING")
+
+            # 3. Pratt Truss Topology
+            elif truss_type_to_build == "Pratt":
+                pt_bot_ctr = slice_origin + truss_dir.Multiply(king_x) + XYZ.BasisZ.Multiply(y_bc)
+                pt_top_ctr = slice_origin + truss_dir.Multiply(king_x) + XYZ.BasisZ.Multiply(highest_node["z"])
+                
+                # Center vertical King Post
+                add_web(pt_bot_ctr, pt_top_ctr, "KING_POST")
+                
+                # Left side vertical posts and diagonals (slanted up-right towards center)
+                x_L1 = heel_x_L + (king_x - heel_x_L) * 0.33
+                x_L2 = heel_x_L + (king_x - heel_x_L) * 0.67
+                
+                pt_bot_L1 = slice_origin + truss_dir.Multiply(x_L1) + XYZ.BasisZ.Multiply(y_bc)
+                pt_top_L1 = slice_origin + truss_dir.Multiply(x_L1) + XYZ.BasisZ.Multiply(get_top_z(x_L1))
+                pt_bot_L2 = slice_origin + truss_dir.Multiply(x_L2) + XYZ.BasisZ.Multiply(y_bc)
+                pt_top_L2 = slice_origin + truss_dir.Multiply(x_L2) + XYZ.BasisZ.Multiply(get_top_z(x_L2))
+                
+                add_web(pt_bot_L1, pt_top_L1, "WEB_BRACING")
+                add_web(pt_bot_L2, pt_top_L2, "WEB_BRACING")
+                
+                pt_bot_heel_L = slice_origin + truss_dir.Multiply(heel_x_L) + XYZ.BasisZ.Multiply(y_bc)
+                add_web(pt_bot_heel_L, pt_top_L1, "WEB_BRACING")
+                add_web(pt_bot_L1, pt_top_L2, "WEB_BRACING")
+                add_web(pt_bot_L2, pt_top_ctr, "WEB_BRACING")
+                
+                # Right side vertical posts and diagonals (slanted up-left towards center)
+                x_R1 = king_x + (heel_x_R - king_x) * 0.33
+                x_R2 = king_x + (heel_x_R - king_x) * 0.67
+                
+                pt_bot_R1 = slice_origin + truss_dir.Multiply(x_R1) + XYZ.BasisZ.Multiply(y_bc)
+                pt_top_R1 = slice_origin + truss_dir.Multiply(x_R1) + XYZ.BasisZ.Multiply(get_top_z(x_R1))
+                pt_bot_R2 = slice_origin + truss_dir.Multiply(x_R2) + XYZ.BasisZ.Multiply(y_bc)
+                pt_top_R2 = slice_origin + truss_dir.Multiply(x_R2) + XYZ.BasisZ.Multiply(get_top_z(x_R2))
+                
+                add_web(pt_bot_R1, pt_top_R1, "WEB_BRACING")
+                add_web(pt_bot_R2, pt_top_R2, "WEB_BRACING")
+                
+                pt_bot_heel_R = slice_origin + truss_dir.Multiply(heel_x_R) + XYZ.BasisZ.Multiply(y_bc)
+                add_web(pt_bot_heel_R, pt_top_R2, "WEB_BRACING")
+                add_web(pt_bot_R2, pt_top_R1, "WEB_BRACING")
+                add_web(pt_top_R1, pt_bot_ctr, "WEB_BRACING")
                     
         # 4. Generate continuous horizontal purlins on top of trusses!
         try:
