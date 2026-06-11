@@ -8,6 +8,7 @@ from wf_config import (
     CEILING_DIRECTION_AUTO,
     CEILING_DIRECTION_X,
     CEILING_DIRECTION_Y,
+    CEILING_DIRECTION_BOTH,
     CEILING_PLACEMENT_ABOVE,
     CEILING_PLACEMENT_CENTER,
     LUMBER_ACTUAL,
@@ -48,8 +49,22 @@ class CeilingFramingEngine(BaseFramingEngine):
 
         layout_axis = self._resolve_layout_axis(span_x, span_y)
 
-        if layout_axis == "x":
-            coords = self._layout_coords(min_y, max_y, spacing)
+        # Determine run axes
+        if layout_axis == "both":
+            primary_axis = "x" if span_x <= span_y else "y"
+            secondary_axis = "y" if primary_axis == "x" else "x"
+        else:
+            primary_axis = layout_axis
+            secondary_axis = None
+
+        grid_style = getattr(self.config, "ceiling_grid_style", "split")
+
+        # Track the coordinates of the primary joists for splitting secondary joists
+        primary_coords = []
+
+        if primary_axis == "x":
+            coords = self._get_layout_coords(min_y, max_y, spacing)
+            primary_coords = coords
             for coord in coords:
                 intervals = ceiling_info.scanline_intervals("y", coord)
                 for start_x, end_x in intervals:
@@ -76,7 +91,8 @@ class CeilingFramingEngine(BaseFramingEngine):
                     self._apply_member_rule(member, ceiling_info)
                     members.append(member)
         else:
-            coords = self._layout_coords(min_x, max_x, spacing)
+            coords = self._get_layout_coords(min_x, max_x, spacing)
+            primary_coords = coords
             for coord in coords:
                 intervals = ceiling_info.scanline_intervals("x", coord)
                 for start_y, end_y in intervals:
@@ -102,6 +118,91 @@ class CeilingFramingEngine(BaseFramingEngine):
                     member.type_name = self.config.stud_type_name
                     self._apply_member_rule(member, ceiling_info)
                     members.append(member)
+
+        # Place secondary joists (if in both-directions mode)
+        if secondary_axis is not None:
+            if secondary_axis == "y":
+                coords = self._get_layout_coords(min_x, max_x, spacing)
+                for coord in coords:
+                    intervals = ceiling_info.scanline_intervals("x", coord)
+                    for start_y, end_y in intervals:
+                        # Determine sub-intervals (split at primary coords or continuous)
+                        sub_intervals = []
+                        if grid_style == "split":
+                            # Find all primary joist Y coords between start_y and end_y
+                            split_pts = sorted([y for y in primary_coords if start_y + 1e-3 < y < end_y - 1e-3])
+                            y_prev = start_y
+                            for y in split_pts:
+                                if y - y_prev >= MIN_MEMBER_LENGTH:
+                                    sub_intervals.append((y_prev, y))
+                                y_prev = y
+                            if end_y - y_prev >= MIN_MEMBER_LENGTH:
+                                sub_intervals.append((y_prev, end_y))
+                        else:
+                            sub_intervals = [(start_y, end_y)]
+
+                        for sub_start_y, sub_end_y in sub_intervals:
+                            start_pt = self._member_point(
+                                ceiling_info,
+                                coord,
+                                sub_start_y,
+                                self.config.stud_family_name,
+                                self.config.stud_type_name,
+                            )
+                            end_pt = self._member_point(
+                                ceiling_info,
+                                coord,
+                                sub_end_y,
+                                self.config.stud_family_name,
+                                self.config.stud_type_name,
+                            )
+                            member = FramingMember(FramingMember.STUD, start_pt, end_pt)
+                            member.member_type = "CEILING_JOIST"
+                            member.family_name = self.config.stud_family_name
+                            member.type_name = self.config.stud_type_name
+                            self._apply_member_rule(member, ceiling_info)
+                            members.append(member)
+            else:
+                coords = self._get_layout_coords(min_y, max_y, spacing)
+                for coord in coords:
+                    intervals = ceiling_info.scanline_intervals("y", coord)
+                    for start_x, end_x in intervals:
+                        # Determine sub-intervals (split at primary coords or continuous)
+                        sub_intervals = []
+                        if grid_style == "split":
+                            # Find all primary joist X coords between start_x and end_x
+                            split_pts = sorted([x for x in primary_coords if start_x + 1e-3 < x < end_x - 1e-3])
+                            x_prev = start_x
+                            for x in split_pts:
+                                if x - x_prev >= MIN_MEMBER_LENGTH:
+                                    sub_intervals.append((x_prev, x))
+                                x_prev = x
+                            if end_x - x_prev >= MIN_MEMBER_LENGTH:
+                                sub_intervals.append((x_prev, end_x))
+                        else:
+                            sub_intervals = [(start_x, end_x)]
+
+                        for sub_start_x, sub_end_x in sub_intervals:
+                            start_pt = self._member_point(
+                                ceiling_info,
+                                sub_start_x,
+                                coord,
+                                self.config.stud_family_name,
+                                self.config.stud_type_name,
+                            )
+                            end_pt = self._member_point(
+                                ceiling_info,
+                                sub_end_x,
+                                coord,
+                                self.config.stud_family_name,
+                                self.config.stud_type_name,
+                            )
+                            member = FramingMember(FramingMember.STUD, start_pt, end_pt)
+                            member.member_type = "CEILING_JOIST"
+                            member.family_name = self.config.stud_family_name
+                            member.type_name = self.config.stud_type_name
+                            self._apply_member_rule(member, ceiling_info)
+                            members.append(member)
 
         return members
 
@@ -155,6 +256,13 @@ class CeilingFramingEngine(BaseFramingEngine):
         if ceiling_info.target_layer is not None:
             member.layer_index = ceiling_info.target_layer.index
 
+    def _get_layout_coords(self, min_value, max_value, spacing):
+        """Resolve layout coordinates based on config style."""
+        mode = getattr(self.config, "ceiling_layout_mode", "standard")
+        if mode == "centered":
+            return self._centered_coords(min_value, max_value, spacing)
+        return self._layout_coords(min_value, max_value, spacing)
+
     @staticmethod
     def _layout_coords(min_value, max_value, spacing):
         """Generate centered framing coordinates from both edges inward."""
@@ -177,6 +285,58 @@ class CeilingFramingEngine(BaseFramingEngine):
             coords.append((min_value + max_value) / 2.0)
         return coords
 
+    @staticmethod
+    def _centered_coords(min_value, max_value, spacing):
+        """Generate mathematically centered framing coordinates with symmetric edge gaps."""
+        span = max_value - min_value
+        if span <= 1e-9 or spacing <= 1e-9:
+            return []
+
+        center = (min_value + max_value) / 2.0
+        import math
+        N = int(math.ceil(span / spacing)) - 1
+        if N <= 0:
+            coords = [center]
+        else:
+            coords = []
+            if N % 2 == 1:
+                half = N // 2
+                for i in range(-half, half + 1):
+                    coords.append(center + i * spacing)
+            else:
+                half = N // 2
+                for i in range(-half, half):
+                    coords.append(center + (i + 0.5) * spacing)
+
+        # Filter out coordinates that are extremely close to the edges
+        tol = 1e-3
+        filtered = [c for c in coords if min_value + tol < c < max_value - tol]
+        if not filtered:
+            filtered = [center]
+
+        # Output pyRevit diagnostics
+        try:
+            from pyrevit import script
+            output = script.get_output()
+            left_gap = filtered[0] - min_value
+            right_gap = max_value - filtered[-1]
+            center_offset = min(abs(c - center) for c in filtered)
+            output.print_md(
+                "#### Centered Joist Layout Diagnostics\n"
+                "- **Span Width**: {:.3f} ft\n"
+                "- **Requested Spacing**: {:.3f} ft\n"
+                "- **Joist Count**: {}\n"
+                "- **Left Edge Gap**: {:.3f} ft\n"
+                "- **Right Edge Gap**: {:.3f} ft\n"
+                "- **Center Offset**: {:.3f} ft".format(
+                    span, spacing, len(filtered), left_gap, right_gap, center_offset
+                )
+            )
+        except Exception:
+            pass
+
+        return sorted(filtered)
+
     def _resolve_layout_axis(self, span_x, span_y):
         """Return the joist run axis in host-local coordinates."""
         mode = getattr(self.config, "ceiling_direction_mode", CEILING_DIRECTION_AUTO)
@@ -184,6 +344,8 @@ class CeilingFramingEngine(BaseFramingEngine):
             return "x"
         if mode == CEILING_DIRECTION_Y:
             return "y"
+        if mode == CEILING_DIRECTION_BOTH:
+            return "both"
         return "x" if span_x <= span_y else "y"
 
     def _member_point(self, ceiling_info, local_x, local_y, family_name, type_name):

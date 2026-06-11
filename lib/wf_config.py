@@ -30,6 +30,7 @@ WALL_BASE_MODE_SUPPORT_TOP = "support_top"
 CEILING_DIRECTION_AUTO = "auto"
 CEILING_DIRECTION_X = "x_axis"
 CEILING_DIRECTION_Y = "y_axis"
+CEILING_DIRECTION_BOTH = "both_ways"
 CEILING_PLACEMENT_ABOVE = "above_top_face"
 CEILING_PLACEMENT_CENTER = "center_in_layer"
 
@@ -99,6 +100,8 @@ class FramingConfig(object):
         self.ceiling_layer_mode = LAYER_MODE_STRUCTURAL
         self.ceiling_direction_mode = CEILING_DIRECTION_AUTO
         self.ceiling_placement_mode = CEILING_PLACEMENT_ABOVE
+        self.ceiling_layout_mode = "standard"
+        self.ceiling_grid_style = "split"
         self.roof_layer_mode = LAYER_MODE_STRUCTURAL
 
         # Wall base reference source
@@ -155,6 +158,8 @@ class FramingConfig(object):
             "ceiling_layer_mode": self.ceiling_layer_mode,
             "ceiling_direction_mode": self.ceiling_direction_mode,
             "ceiling_placement_mode": self.ceiling_placement_mode,
+            "ceiling_layout_mode": self.ceiling_layout_mode,
+            "ceiling_grid_style": self.ceiling_grid_style,
             "roof_layer_mode": self.roof_layer_mode,
             "wall_base_mode": self.wall_base_mode,
             "wall_base_override_z": self.wall_base_override_z,

@@ -29,6 +29,7 @@ from wf_config import (
     CEILING_DIRECTION_AUTO,
     CEILING_DIRECTION_X,
     CEILING_DIRECTION_Y,
+    CEILING_DIRECTION_BOTH,
     CEILING_PLACEMENT_ABOVE,
     CEILING_PLACEMENT_CENTER,
     FramingConfig,
@@ -79,12 +80,18 @@ class FrameCeilingDialog(WPFWindow):
         self.cb_layout_direction.Items.Add("Auto (span shorter direction)")
         self.cb_layout_direction.Items.Add("Along local X axis")
         self.cb_layout_direction.Items.Add("Along local Y axis")
+        self.cb_layout_direction.Items.Add("Both directions (Grid)")
         self.cb_layout_direction.SelectedIndex = 0
 
         self.cb_placement.Items.Clear()
         self.cb_placement.Items.Add("Above ceiling top face")
         self.cb_placement.Items.Add("Center in ceiling layer (legacy)")
         self.cb_placement.SelectedIndex = 0
+
+        self.cb_layout_style.Items.Clear()
+        self.cb_layout_style.Items.Add("Standard")
+        self.cb_layout_style.Items.Add("Centered")
+        self.cb_layout_style.SelectedIndex = 0
 
         self.tb_summary.Text = (
             "Frame {0} ceiling(s). Joists are placed above the ceiling top face by default."
@@ -143,13 +150,20 @@ class FrameCeilingDialog(WPFWindow):
             CEILING_DIRECTION_AUTO,
             CEILING_DIRECTION_X,
             CEILING_DIRECTION_Y,
-        ][max(0, min(2, direction_idx))]
+            CEILING_DIRECTION_BOTH,
+        ][max(0, min(3, direction_idx))]
 
         placement_idx = self.cb_placement.SelectedIndex
         cfg.ceiling_placement_mode = [
             CEILING_PLACEMENT_ABOVE,
             CEILING_PLACEMENT_CENTER,
         ][max(0, min(1, placement_idx))]
+
+        layout_style_idx = self.cb_layout_style.SelectedIndex
+        cfg.ceiling_layout_mode = [
+            "standard",
+            "centered",
+        ][max(0, min(1, layout_style_idx))]
 
         return cfg
 
@@ -164,6 +178,7 @@ class FrameCeilingDialog(WPFWindow):
                 "custom_val": self.tb_custom_spacing.Text,
                 "direction_idx": self.cb_layout_direction.SelectedIndex,
                 "placement_idx": self.cb_placement.SelectedIndex,
+                "layout_style_idx": self.cb_layout_style.SelectedIndex,
             }
             cfg_dir = os.path.dirname(_CFG_PATH)
             if not os.path.exists(cfg_dir):
@@ -189,12 +204,16 @@ class FrameCeilingDialog(WPFWindow):
                 self.cb_rim_type.SelectedItem = rim_label
 
             direction_idx = data.get("direction_idx", 0)
-            if direction_idx in (0, 1, 2):
+            if direction_idx in (0, 1, 2, 3):
                 self.cb_layout_direction.SelectedIndex = direction_idx
 
             placement_idx = data.get("placement_idx", 0)
             if placement_idx in (0, 1):
                 self.cb_placement.SelectedIndex = placement_idx
+
+            layout_style_idx = data.get("layout_style_idx", 0)
+            if layout_style_idx in (0, 1):
+                self.cb_layout_style.SelectedIndex = layout_style_idx
 
             if data.get("spacing_24"):
                 self.rb_24oc.IsChecked = True
