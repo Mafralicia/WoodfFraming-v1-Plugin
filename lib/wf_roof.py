@@ -2587,8 +2587,40 @@ class RoofFramingEngine(BaseFramingEngine):
             members.append(m_bc)
             
             # Web Bracing Generation based on selected Truss Type
+            # Find the best ridge line to align the truss peak horizontally
+            king_x = None
+            ridge_edges = [edge for edge in graph.edges.values() if edge.edge_type == "RIDGE"]
+            if ridge_edges:
+                crossings = []
+                for edge in ridge_edges:
+                    A = edge.node_a.pt
+                    B = edge.node_b.pt
+                    da = (A - slice_origin).DotProduct(slice_normal)
+                    db = (B - slice_origin).DotProduct(slice_normal)
+                    if abs(da - db) > 1e-7:
+                        t = da / (da - db)
+                        pt_int = A + (B - A).Multiply(t)
+                        x_val = (pt_int - slice_origin).DotProduct(truss_dir)
+                        # Ensure the crossing is within or very close to the truss span
+                        if heel_x_L - 1.0 <= x_val <= heel_x_R + 1.0:
+                            # Distance from actual segment (prioritize actual crossings where 0 <= t <= 1)
+                            dist_to_segment = 0.0
+                            if t < 0.0:
+                                dist_to_segment = abs(t) * (B - A).GetLength()
+                            elif t > 1.0:
+                                dist_to_segment = (t - 1.0) * (B - A).GetLength()
+                            crossings.append((x_val, pt_int, dist_to_segment))
+                
+                if crossings:
+                    # Sort crossings: prioritize actual crossings first, then closest extension
+                    crossings.sort(key=lambda c: (c[2], abs(c[0] - (heel_x_L + heel_x_R)/2.0)))
+                    king_x = crossings[0][0]
+                    
+            if king_x is None:
+                highest_node = max(filtered_nodes, key=lambda n: n["z"])
+                king_x = highest_node["x"]
+                
             highest_node = max(filtered_nodes, key=lambda n: n["z"])
-            king_x = highest_node["x"]
 
             def get_top_z(x):
                 best_z_val = -1e9
