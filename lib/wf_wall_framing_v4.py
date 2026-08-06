@@ -49,11 +49,13 @@ from wf_wall_assemblies import (
 )
 from wf_materials import (
     DEPTH_PARAM_NAMES,
+    MATERIAL_STEEL,
     MATERIAL_WOOD,
     WIDTH_PARAM_NAMES,
     fallback_depth_ft,
     fallback_width_ft,
     header_ply_spacer_ft,
+    warn_unresolved_steel_dims,
 )
 
 
@@ -130,6 +132,7 @@ def configure_material_profile(doc, config):
     stud_width = _resolve_symbol_dim(
         doc, config.stud_family_name, config.stud_type_name, True, WIDTH_PARAM_NAMES
     )
+    stud_fallback = stud_width is None
     if stud_width is None:
         stud_width = fallback_width_ft(material)
 
@@ -140,8 +143,26 @@ def configure_material_profile(doc, config):
         plate_width = _resolve_symbol_dim(
             doc, config.bottom_plate_family_name, config.bottom_plate_type_name, False, WIDTH_PARAM_NAMES
         )
+    plate_fallback = plate_width is None
     if plate_width is None:
         plate_width = fallback_width_ft(material)
+
+    # Steel stud/track dimensions vary far more than wood's fairly narrow
+    # "2x_" convention (1-5/8" to 12"+ deep, multiple gauges per depth), so
+    # silently guessing a generic default is a real risk of mis-sized
+    # framing going unnoticed. Wood's fallback is left silent, matching
+    # its pre-existing behavior, since nominal lumber sizing is standard
+    # enough that the generic default is very likely correct anyway.
+    if material == MATERIAL_STEEL and stud_fallback:
+        warn_unresolved_steel_dims(
+            "wall stud", config.stud_family_name, config.stud_type_name
+        )
+    if material == MATERIAL_STEEL and plate_fallback:
+        warn_unresolved_steel_dims(
+            "wall plate/track",
+            config.top_plate_family_name or config.bottom_plate_family_name,
+            config.top_plate_type_name or config.bottom_plate_type_name,
+        )
 
     STUD_THICKNESS = stud_width
     PLATE_THICKNESS = plate_width

@@ -226,3 +226,34 @@ def fallback_width_ft(material):
 def header_ply_spacer_ft(material):
     """Gap left between built-up header plies for a material, in FEET."""
     return get_material_defaults(material)["header_ply_spacer_in"] / 12.0
+
+
+def warn_unresolved_steel_dims(kind_label, family_name, type_name):
+    """Best-effort warning when a steel member's real dimensions couldn't be
+    read off its family/type and a generic material default had to be
+    substituted instead.
+
+    Steel stud/track/joist dimensions vary far more than wood's fairly
+    narrow "2x_" convention (1-5/8" to 12"+ deep, several gauges per
+    depth), so silently guessing a generic default risks mis-sized framing
+    going unnoticed -- unlike wood, where the generic fallback is very
+    likely correct anyway, so it stays silent. Only call this for
+    MATERIAL_STEEL. Safe to call from anywhere (including outside
+    pyRevit/Revit) -- failures to emit the warning are swallowed so this
+    can never block a run.
+    """
+    try:
+        from pyrevit import script
+
+        label = "{0} ({1} : {2})".format(
+            kind_label, family_name or "?", type_name or "?"
+        )
+        script.get_output().print_md(
+            "\n> **Warning: Steel dimensions could not be read for {0}.** "
+            "The family/type may be missing, or missing a depth parameter "
+            "('d' / 'Depth' / 'Web Depth' / ...). A generic default was used "
+            "-- verify the generated framing size, or set the parameter on "
+            "the family and re-run.".format(label)
+        )
+    except Exception:
+        pass

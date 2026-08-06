@@ -23,7 +23,13 @@ import math
 
 from wf_geometry import FramingMember, inches_to_feet
 from wf_config import MATERIAL_WOOD
-from wf_materials import actual_dims_from_text, fallback_depth_ft, fallback_width_ft
+from wf_materials import (
+    MATERIAL_STEEL,
+    actual_dims_from_text,
+    fallback_depth_ft,
+    fallback_width_ft,
+    warn_unresolved_steel_dims,
+)
 from wf_host import (
     PlanarHostInfo,
     _extract_face_loops,
@@ -1274,7 +1280,9 @@ class RoofFramingEngine(BaseFramingEngine):
         roof_info = analyze_roof_host(self.doc, roof, self.config)
         if roof_info is None:
             return [], None
-            
+
+        self._warn_if_steel_rafter_dims_unresolved()
+
         if mode == "truss":
             members = self._calc_truss_positions(roof_info)
         else:
@@ -2096,6 +2104,31 @@ class RoofFramingEngine(BaseFramingEngine):
             return width, depth
 
         return fallback_width_ft(material), 0.0
+
+    def _warn_if_steel_rafter_dims_unresolved(self):
+        """Once per roof, warn if the primary rafter/top-chord's steel
+        dimensions can't be read.
+
+        A single pre-flight check on the primary member family, rather than
+        inside _resolve_roof_member_size (which runs once per rafter/ridge/
+        purlin/chord/web member across the whole roof) so the warning isn't
+        repeated dozens of times. Ridge, purlin, and truss chord/web
+        families are not separately checked here -- this catches the most
+        common misconfiguration (the rafter/top-chord family itself)
+        without adding a warning pass for every roof member role.
+        """
+        material = getattr(self.config, "framing_material", MATERIAL_WOOD)
+        if material != MATERIAL_STEEL:
+            return
+        family_name = self.config.stud_family_name
+        type_name = self.config.stud_type_name
+        depth = self.get_type_depth(family_name, type_name)
+        if depth is not None and depth > 0.0:
+            return
+        text = "{0} {1}".format(family_name or "", type_name or "")
+        if actual_dims_from_text(text) is not None:
+            return
+        warn_unresolved_steel_dims("roof rafter/top chord", family_name, type_name)
 
     def _get_support_elements(self, roof_info):
         from Autodesk.Revit.DB import FilteredElementCollector, Wall, BuiltInCategory, Outline, BoundingBoxIntersectsFilter, XYZ

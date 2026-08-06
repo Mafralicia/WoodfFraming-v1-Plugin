@@ -12,7 +12,12 @@ from wf_config import (
     MATERIAL_WOOD,
 )
 from wf_host import analyze_ceiling_host
-from wf_materials import actual_dims_from_text, fallback_depth_ft
+from wf_materials import (
+    MATERIAL_STEEL,
+    actual_dims_from_text,
+    fallback_depth_ft,
+    warn_unresolved_steel_dims,
+)
 from wf_placement import BaseFramingEngine
 
 
@@ -27,6 +32,8 @@ class CeilingFramingEngine(BaseFramingEngine):
         ceiling_info = analyze_ceiling_host(self.doc, ceiling, self.config)
         if ceiling_info is None:
             return [], None
+
+        self._warn_if_steel_joist_dims_unresolved()
 
         members = []
         members.extend(self._calc_joists(ceiling_info))
@@ -374,3 +381,23 @@ class CeilingFramingEngine(BaseFramingEngine):
 
         material = getattr(self.config, "framing_material", MATERIAL_WOOD)
         return fallback_depth_ft(material, "stud")
+
+    def _warn_if_steel_joist_dims_unresolved(self):
+        """Once per ceiling, warn if steel joist dimensions can't be read.
+
+        Deliberately a single pre-flight check here rather than inside
+        _resolve_member_depth (which runs once per joist/rim-joist member --
+        dozens of times per ceiling) so the warning doesn't get repeated.
+        """
+        material = getattr(self.config, "framing_material", MATERIAL_WOOD)
+        if material != MATERIAL_STEEL:
+            return
+        family_name = self.config.stud_family_name
+        type_name = self.config.stud_type_name
+        depth = self.get_type_depth(family_name, type_name)
+        if depth is not None and depth > 0.0:
+            return
+        text = "{0} {1}".format(family_name or "", type_name or "")
+        if actual_dims_from_text(text) is not None:
+            return
+        warn_unresolved_steel_dims("ceiling joist", family_name, type_name)

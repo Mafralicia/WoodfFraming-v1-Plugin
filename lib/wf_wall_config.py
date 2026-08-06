@@ -8,7 +8,7 @@ family types, plate options, and per-project overrides.
 import json
 import os
 
-from wf_materials import LUMBER_ACTUAL, MATERIAL_STEEL, MATERIAL_WOOD
+from wf_materials import MATERIAL_WOOD
 
 
 # Default stud spacings in INCHES (converted to feet at usage)

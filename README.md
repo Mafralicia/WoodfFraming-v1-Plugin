@@ -109,6 +109,13 @@ WoodFraming.extension/
 - `extension.json` contains the pyRevit extension metadata.
 - `lib/` contains shared Python modules for framing, geometry, family handling, schedules, tracking, host analysis, floors, ceilings, roofs, and wall framing.
 - `Wood Framing.tab/` contains the pyRevit ribbon structure and active tool buttons.
+- `tests/` contains automated tests for the parts of `lib/` that have no Revit API dependency (currently `wf_materials.py`, the wood/steel dimension-resolution logic). These run with a plain CPython interpreter -- no Revit, pyRevit, or IronPython needed:
+
+  ```text
+  python -m unittest discover -s tests -v
+  ```
+
+  Most of `lib/` does depend on the Revit API and can only be exercised by actually running the tools inside Revit -- this suite is a narrow, fast regression net for the one module that doesn't.
 
 ## pyRevit references checked
 
