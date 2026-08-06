@@ -13,6 +13,7 @@ value computed by the framing engine for each member.
 
 from wf_geometry import inches_to_feet
 from wf_families import activate_symbol, find_family_symbol
+from wf_materials import DEPTH_PARAM_NAMES, WIDTH_PARAM_NAMES
 from wf_schedule_utils import ensure_bom_parameters, apply_bom_metadata_from_member
 from wf_tracking import tag_instance
 
@@ -302,14 +303,15 @@ class BaseFramingEngine(object):
         if symbol is None:
             return None
 
-        param = symbol.LookupParameter("d")
-        if param is not None:
-            try:
-                val = param.AsDouble()
-                if val > 0:
-                    return val
-            except Exception:
-                pass
+        for name in DEPTH_PARAM_NAMES:
+            param = symbol.LookupParameter(name)
+            if param is not None:
+                try:
+                    val = param.AsDouble()
+                    if val > 0:
+                        return val
+                except Exception:
+                    pass
         return None
 
     def get_type_width(self, family_name, type_name):
@@ -337,14 +339,15 @@ class BaseFramingEngine(object):
         if symbol is None:
             return None
 
-        param = symbol.LookupParameter("b")
-        if param is not None:
-            try:
-                val = param.AsDouble()
-                if val > 0:
-                    return val
-            except Exception:
-                pass
+        for name in WIDTH_PARAM_NAMES:
+            param = symbol.LookupParameter(name)
+            if param is not None:
+                try:
+                    val = param.AsDouble()
+                    if val > 0:
+                        return val
+                except Exception:
+                    pass
         return None
 
     # ------------------------------------------------------------------

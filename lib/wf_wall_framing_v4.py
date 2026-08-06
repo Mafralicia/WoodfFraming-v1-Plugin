@@ -40,18 +40,32 @@ from wf_wall_topology import (
     ReservationPriority,
     is_d_reserved,
 )
+import wf_wall_assemblies
 from wf_wall_assemblies import (
     CornerAssemblyGenerator,
     TIntersectionGenerator,
     WindowAssembly,
     DoorAssembly,
-    PLATE_THICKNESS as ASM_PLATE_THICKNESS,
-    STUD_THICKNESS as ASM_STUD_THICKNESS,
+)
+from wf_materials import (
+    DEPTH_PARAM_NAMES,
+    MATERIAL_WOOD,
+    WIDTH_PARAM_NAMES,
+    fallback_depth_ft,
+    fallback_width_ft,
 )
 
 
 ENGINE_NAME = "wall-framing-5.0-topology"
 MIN_MEMBER_LENGTH = inches_to_feet(1.0)
+
+# The five constants below describe the "typical" member thickness/depth
+# used throughout this file's plate-stacking, spacing, and collision math.
+# They start out as wood dimensional-lumber defaults, but
+# configure_material_profile() (called once from the engine's __init__)
+# overwrites them with the real dimensions of whichever stud/plate
+# family+type the user selected -- or, failing that, material-specific
+# defaults from wf_materials -- so the same math is correct for steel too.
 PLATE_THICKNESS = inches_to_feet(1.5)
 STUD_THICKNESS = inches_to_feet(1.5)
 DEFAULT_LUMBER_DEPTH = inches_to_feet(3.5)
@@ -67,6 +81,78 @@ OPENING_STUD_COLLISION_TOL = STUD_THICKNESS * 0.45
 HEADER_PLY_SPACER = inches_to_feet(0.5)
 MIN_HEADER_PLY_COUNT = 2
 OPENING_FRAME_MEMBER_TYPES = MemberKind.ASSEMBLY_KINDS
+
+
+def _resolve_symbol_dim(doc, family_name, type_name, is_column, param_names):
+    """Read a real cross-section dimension off a FamilySymbol, trying each
+    parameter name in turn. Works for wood or steel families alike -- it
+    just reads whatever the structural framing/column profile parameters
+    say. Returns None if the symbol or parameter can't be resolved.
+    """
+    from Autodesk.Revit.DB import BuiltInCategory
+
+    if not family_name or not type_name:
+        return None
+    category = (
+        BuiltInCategory.OST_StructuralColumns
+        if is_column
+        else BuiltInCategory.OST_StructuralFraming
+    )
+    symbol = find_family_symbol(doc, family_name, type_name, category)
+    if symbol is None:
+        return None
+    for name in param_names:
+        value = _lookup_double(symbol, name)
+        if value is not None and value > 0.0:
+            return value
+    return None
+
+
+def configure_material_profile(doc, config):
+    """Resolve this run's wall member thickness/depth defaults.
+
+    Prefers the real width of the selected stud (column family) and plate
+    (framing family) symbols -- correct for any material the user picked --
+    and falls back to wood/steel defaults from wf_materials only when a
+    real dimension can't be read. Must run once before calculate_members()
+    since every free function in this module (and, via
+    wf_wall_assemblies.configure_material_profile, that module's
+    corner/T-intersection/opening assembly math) reads these as shared
+    module-level state.
+    """
+    global PLATE_THICKNESS, STUD_THICKNESS, DEFAULT_LUMBER_DEPTH
+    global DEFAULT_LUMBER_WIDTH, DEFAULT_HEADER_DEPTH
+    global PROFILE_EDGE_TOL, OPENING_STUD_COLLISION_TOL
+
+    material = getattr(config, "framing_material", MATERIAL_WOOD)
+
+    stud_width = _resolve_symbol_dim(
+        doc, config.stud_family_name, config.stud_type_name, True, WIDTH_PARAM_NAMES
+    )
+    if stud_width is None:
+        stud_width = fallback_width_ft(material)
+
+    plate_width = _resolve_symbol_dim(
+        doc, config.top_plate_family_name, config.top_plate_type_name, False, WIDTH_PARAM_NAMES
+    )
+    if plate_width is None:
+        plate_width = _resolve_symbol_dim(
+            doc, config.bottom_plate_family_name, config.bottom_plate_type_name, False, WIDTH_PARAM_NAMES
+        )
+    if plate_width is None:
+        plate_width = fallback_width_ft(material)
+
+    STUD_THICKNESS = stud_width
+    PLATE_THICKNESS = plate_width
+    DEFAULT_LUMBER_WIDTH = stud_width
+    DEFAULT_LUMBER_DEPTH = fallback_depth_ft(material, "stud")
+    DEFAULT_HEADER_DEPTH = fallback_depth_ft(material, "header")
+    PROFILE_EDGE_TOL = STUD_THICKNESS * 2.0
+    OPENING_STUD_COLLISION_TOL = STUD_THICKNESS * 0.45
+
+    wf_wall_assemblies.configure_material_profile(
+        STUD_THICKNESS, PLATE_THICKNESS, DEFAULT_LUMBER_DEPTH
+    )
 
 
 class WallCavityOpeningV4(object):
@@ -157,6 +243,10 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
     5. Generates infill studs using the node's LayoutPhase, skipping reserved
        regions so layout and assemblies never collide.
     """
+
+    def __init__(self, doc, config):
+        BaseFramingEngine.__init__(self, doc, config)
+        configure_material_profile(doc, config)
 
     def calculate_members(self, wall, graph=None):
         """Calculate all framing members for *wall*.
@@ -1390,7 +1480,7 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
             symbol = find_family_symbol(self.doc, family, type_name, category)
         if symbol is None:
             return DEFAULT_LUMBER_DEPTH
-        for name in ("d", "Depth", "Nominal Depth", "Height"):
+        for name in DEPTH_PARAM_NAMES:
             value = _lookup_double(symbol, name)
             if value is not None and value > 0.0:
                 return value
@@ -1415,7 +1505,7 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
             symbol = find_family_symbol(self.doc, family, type_name, category)
         if symbol is None:
             return DEFAULT_LUMBER_WIDTH
-        for name in ("b", "Width", "Nominal Width"):
+        for name in WIDTH_PARAM_NAMES:
             value = _lookup_double(symbol, name)
             if value is not None and value > 0.0:
                 return value

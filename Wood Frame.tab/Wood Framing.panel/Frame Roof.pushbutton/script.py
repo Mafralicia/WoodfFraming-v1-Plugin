@@ -26,25 +26,11 @@ from pyrevit import revit, DB, script, forms
 from pyrevit.forms import WPFWindow
 from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
 
-from wf_config import FramingConfig, SPACING_16OC, SPACING_24OC
+from wf_config import FramingConfig, SPACING_12OC, SPACING_16OC, SPACING_24OC
 from wf_families import get_available_types_flat, parse_family_type_label
+from wf_materials import MATERIAL_STEEL, MATERIAL_WOOD
 from wf_roof import RoofFramingEngine
 from wf_tracking import delete_tracked_members_for_hosts
-
-# ==============================================================================
-# PARAMETRIC WOOD FRAME ENGINEERING CONFIGURATION
-# ==============================================================================
-truss_spacing = 24.0      # center-to-center (O.C.) distance between trusses (inches)
-ceiling_spacing = 16.0    # independent center-to-center distance for ceiling grid (inches)
-truss_type = "KingPost"   # Truss topology: "KingPost" | "Fink" | "Pratt" | "Dynamic"
-
-# Family Symbol Mappings by structural function
-# Format: ("Family Name", "Type Name")
-FAMILY_TOP_CHORDS = ("Wood Dimension Lumber-Framing", "2x6")
-FAMILY_BOTTOM_CHORDS = ("Wood Dimension Lumber-Framing", "2x6")
-FAMILY_WEB_BRACING = ("Wood Dimension Lumber-Framing", "2x4")
-FAMILY_HIPS_RIDGES = ("Wood Dimension Lumber-Framing", "2x8")
-# ==============================================================================
 
 
 output = script.get_output()
@@ -129,7 +115,9 @@ class FrameRoofDialog(WPFWindow):
         style = "truss" if self.rb_style_truss.IsChecked else "stick"
 
         # Truss spacing
-        if self.rb_truss_16oc.IsChecked:
+        if self.rb_truss_12oc.IsChecked:
+            truss_sp = 12.0
+        elif self.rb_truss_16oc.IsChecked:
             truss_sp = 16.0
         elif self.rb_truss_24oc.IsChecked:
             truss_sp = 24.0
@@ -140,7 +128,9 @@ class FrameRoofDialog(WPFWindow):
                 truss_sp = 24.0
 
         # Ceiling spacing
-        if self.rb_ceil_16oc.IsChecked:
+        if self.rb_ceil_12oc.IsChecked:
+            ceil_sp = 12.0
+        elif self.rb_ceil_16oc.IsChecked:
             ceil_sp = 16.0
         elif self.rb_ceil_24oc.IsChecked:
             ceil_sp = 24.0
@@ -171,6 +161,9 @@ class FrameRoofDialog(WPFWindow):
         family_ridge = parse_family_type_label(str(ridge_sel)) if ridge_sel else ("", "")
 
         cfg = FramingConfig()
+        cfg.framing_material = (
+            MATERIAL_STEEL if self.rb_material_steel.IsChecked else MATERIAL_WOOD
+        )
         cfg.stud_spacing = truss_sp
         cfg.stud_family_name = family_tc[0]
         cfg.stud_type_name = family_tc[1]
@@ -213,9 +206,24 @@ class FrameRoofDialog(WPFWindow):
             data["_web_label"] = str(self.cb_web_type.SelectedItem or "")
             data["_ridge_label"] = str(self.cb_ridge_type.SelectedItem or "")
             
-            data["_truss_sp_state"] = "16" if self.rb_truss_16oc.IsChecked else ("24" if self.rb_truss_24oc.IsChecked else "custom")
+            if self.rb_truss_12oc.IsChecked:
+                data["_truss_sp_state"] = "12"
+            elif self.rb_truss_16oc.IsChecked:
+                data["_truss_sp_state"] = "16"
+            elif self.rb_truss_24oc.IsChecked:
+                data["_truss_sp_state"] = "24"
+            else:
+                data["_truss_sp_state"] = "custom"
             data["_truss_custom_text"] = self.tb_truss_custom.Text
-            data["_ceil_sp_state"] = "16" if self.rb_ceil_16oc.IsChecked else ("24" if self.rb_ceil_24oc.IsChecked else "custom")
+
+            if self.rb_ceil_12oc.IsChecked:
+                data["_ceil_sp_state"] = "12"
+            elif self.rb_ceil_16oc.IsChecked:
+                data["_ceil_sp_state"] = "16"
+            elif self.rb_ceil_24oc.IsChecked:
+                data["_ceil_sp_state"] = "24"
+            else:
+                data["_ceil_sp_state"] = "custom"
             data["_ceil_custom_text"] = self.tb_ceil_custom.Text
 
             directory = os.path.dirname(_CFG_PATH)
@@ -232,6 +240,11 @@ class FrameRoofDialog(WPFWindow):
                 return
             with open(_CFG_PATH, "r") as stream:
                 data = json.load(stream)
+
+            self.rb_material_steel.IsChecked = (
+                data.get("framing_material") == MATERIAL_STEEL
+            )
+            self.rb_material_wood.IsChecked = not self.rb_material_steel.IsChecked
 
             mode = data.get("_mode", "truss")
             if mode == "truss":
@@ -259,7 +272,9 @@ class FrameRoofDialog(WPFWindow):
                 self.cb_ridge_type.SelectedItem = ridge_label
 
             truss_sp_state = data.get("_truss_sp_state", "24")
-            if truss_sp_state == "16":
+            if truss_sp_state == "12":
+                self.rb_truss_12oc.IsChecked = True
+            elif truss_sp_state == "16":
                 self.rb_truss_16oc.IsChecked = True
             elif truss_sp_state == "24":
                 self.rb_truss_24oc.IsChecked = True
@@ -268,7 +283,9 @@ class FrameRoofDialog(WPFWindow):
                 self.tb_truss_custom.Text = data.get("_truss_custom_text", "24")
 
             ceil_sp_state = data.get("_ceil_sp_state", "16")
-            if ceil_sp_state == "16":
+            if ceil_sp_state == "12":
+                self.rb_ceil_12oc.IsChecked = True
+            elif ceil_sp_state == "16":
                 self.rb_ceil_16oc.IsChecked = True
             elif ceil_sp_state == "24":
                 self.rb_ceil_24oc.IsChecked = True

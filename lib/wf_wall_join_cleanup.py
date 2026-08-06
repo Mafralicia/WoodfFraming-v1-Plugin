@@ -3,16 +3,22 @@
 
 import math
 
+import wf_wall_framing_v4 as _wf4
 from wf_wall_framing_v4 import (
-    DEFAULT_LUMBER_DEPTH,
     MIN_MEMBER_LENGTH,
     PLATE_ROTATION,
-    PLATE_THICKNESS,
-    STUD_THICKNESS,
     WallCavityFramingV4Engine,
     _side_stud_position,
     _vertical_bounds,
 )
+
+# NOTE: PLATE_THICKNESS / STUD_THICKNESS / DEFAULT_LUMBER_DEPTH are NOT
+# imported as bare names here on purpose -- wf_wall_framing_v4.configure_material_profile()
+# reassigns those module globals at runtime once the real stud/plate
+# family dimensions are resolved, and a `from X import NAME` binding would
+# have frozen a stale snapshot from module-load time. Access them via
+# `_wf4.PLATE_THICKNESS` etc. below so this file always sees the current
+# value.
 from wf_wall_geometry import inches_to_feet
 from wf_wall_tracking import get_tracking_data
 
@@ -422,7 +428,7 @@ def _horizontal_member(engine, host, role, start_d, end_d, z_abs):
         type_name,
         False,
         PLATE_ROTATION,
-        PLATE_THICKNESS,
+        _wf4.PLATE_THICKNESS,
         depth,
     )
     if member is None:
@@ -574,7 +580,7 @@ def _end_stud_d(host, end_index, other_host=None, join_point=None):
     if other_host is not None and join_point is not None:
         sign = _end_sign(end_index)
         core_half = _host_core_width(other_host) * 0.5
-        stud_half = STUD_THICKNESS * 0.5
+        stud_half = _wf4.STUD_THICKNESS * 0.5
         center = _projection_distance(host, join_point) + sign * (core_half - stud_half)
         return _clamp_d(host, center)
 
@@ -583,7 +589,7 @@ def _end_stud_d(host, end_index, other_host=None, join_point=None):
 
 
 def _inboard_stud_d(host, end_index, end_stud_d, stud_steps):
-    offset = STUD_THICKNESS * max(1, int(stud_steps))
+    offset = _wf4.STUD_THICKNESS * max(1, int(stud_steps))
     if end_index == 0:
         return _clamp_d(host, end_stud_d + offset)
     return _clamp_d(host, end_stud_d - offset)
@@ -597,9 +603,9 @@ def _host_core_width(host):
     target_layer = getattr(host, "target_layer", None)
     if target_layer is not None:
         width = float(getattr(target_layer, "width", 0.0) or 0.0)
-        if width > STUD_THICKNESS:
+        if width > _wf4.STUD_THICKNESS:
             return width
-    return DEFAULT_LUMBER_DEPTH
+    return _wf4.DEFAULT_LUMBER_DEPTH
 
 
 def _t_backing_offset(branch_host):
@@ -607,7 +613,7 @@ def _t_backing_offset(branch_host):
     target_layer = getattr(branch_host, "target_layer", None)
     if target_layer is not None:
         width = float(getattr(target_layer, "width", 0.0) or 0.0)
-    return max(STUD_THICKNESS, width * 0.5 + STUD_THICKNESS * 0.5)
+    return max(_wf4.STUD_THICKNESS, width * 0.5 + _wf4.STUD_THICKNESS * 0.5)
 
 
 def _clamp_d(host, d):

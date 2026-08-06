@@ -1,6 +1,6 @@
 # swich-wood-framing
 
-`swich-wood-framing` is a pyRevit extension for Autodesk Revit wood framing workflows.
+`swich-wood-framing` is a pyRevit extension for Autodesk Revit framing workflows, covering both wood dimensional-lumber and cold-formed steel (CFS) framing.
 
 This repository contains one pyRevit extension folder:
 
@@ -16,6 +16,15 @@ When loaded in Revit, the extension adds a `Wood Framing` tab with a `Wood Frami
 - Tested only in Autodesk Revit 2026.
 - Not verified in any other Revit version.
 - Not perfect. Review the model output before using it for production, estimating, fabrication, coordination, or construction decisions.
+
+## Wood and steel (CFS) framing
+
+Every framing tool (Wall Framing, Floor Framing, Ceiling Framing, Roof Framing) has a **Material** selector: `Wood` or `Steel (CFS)`.
+
+- **Family/type selection is unchanged either way.** Every tool's family and type dropdowns list whatever structural framing/column families are already loaded in your Revit project, so pick and load your own wood or steel stud/track/joist families as usual -- the extension does not ship its own family content.
+- **The Material toggle affects geometry math and fallback sizing**, not family discovery: stud/track spacing math, plate/track stacking heights, and header/joist depth fallbacks all read the real dimensions off whichever family/type you selected first, and only fall back to material-appropriate defaults (e.g. 1-5/8" CFS stud flange vs. 1-1/2" wood stud thickness) when a family's dimensions can't be read.
+- Steel family/type names in the standard SSMA format (e.g. `350S162-33`, `600T125-54`) are recognized automatically wherever the tools need to infer a nominal size from a name (in addition to wood nominal sizes like `2x6`).
+- Spacing options include 12"/16"/24" O.C. (steel framing commonly uses 12" O.C. in addition to the 16"/24" O.C. common to wood).
 
 ## Disclaimer
 

@@ -1,11 +1,10 @@
 ﻿# -*- coding: utf-8 -*-
 """Floor framing engine using the shared host-local framing core."""
 
-import re
-
-from wf_config import LUMBER_ACTUAL
+from wf_config import MATERIAL_WOOD
 from wf_geometry import FramingMember, inches_to_feet
 from wf_host import analyze_floor_host
+from wf_materials import actual_dims_from_text, fallback_depth_ft
 from wf_placement import BaseFramingEngine
 
 
@@ -162,24 +161,18 @@ class FloorFramingEngine(BaseFramingEngine):
         return floor_info.point_at(local_x, local_y, depth_offset)
 
     def _resolve_member_depth(self, family_name, type_name):
-        """Resolve member depth from the family symbol or nominal lumber size."""
+        """Resolve member depth from the family symbol or nominal size (wood or steel)."""
         depth = self.get_type_depth(family_name, type_name)
         if depth is not None and depth > 0.0:
             return depth
 
-        text = "{0} {1}".format(family_name or "", type_name or "").lower()
-        for nominal, dimensions in LUMBER_ACTUAL.items():
-            if nominal.lower() in text:
-                return inches_to_feet(dimensions[1])
+        text = "{0} {1}".format(family_name or "", type_name or "")
+        dims = actual_dims_from_text(text)
+        if dims is not None:
+            return inches_to_feet(dims[1])
 
-        match = re.search(r"\b2x(2|3|4|6|8|10|12)\b", text)
-        if match:
-            nominal = "2x{0}".format(match.group(1))
-            dims = LUMBER_ACTUAL.get(nominal)
-            if dims is not None:
-                return inches_to_feet(dims[1])
-
-        return inches_to_feet(7.25)
+        material = getattr(self.config, "framing_material", MATERIAL_WOOD)
+        return fallback_depth_ft(material, "stud")
 
     @staticmethod
     def _interior_coords(min_value, max_value, spacing):

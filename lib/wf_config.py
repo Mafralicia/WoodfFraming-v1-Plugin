@@ -8,8 +8,11 @@ family types, plate options, and per-project overrides.
 import json
 import os
 
+from wf_materials import LUMBER_ACTUAL, MATERIAL_STEEL, MATERIAL_WOOD
+
 
 # Default stud spacings in INCHES (converted to feet at usage)
+SPACING_12OC = 12.0
 SPACING_16OC = 16.0
 SPACING_24OC = 24.0
 
@@ -34,22 +37,15 @@ CEILING_DIRECTION_BOTH = "both_ways"
 CEILING_PLACEMENT_ABOVE = "above_top_face"
 CEILING_PLACEMENT_CENTER = "center_in_layer"
 
-# Default member actual dimensions in INCHES
-LUMBER_ACTUAL = {
-    "2x2": (1.5, 1.5),
-    "2x3": (1.5, 2.5),
-    "2x4": (1.5, 3.5),
-    "2x6": (1.5, 5.5),
-    "2x8": (1.5, 7.25),
-    "2x10": (1.5, 9.25),
-    "2x12": (1.5, 11.25),
-}
-
-
 class FramingConfig(object):
     """Holds all framing configuration for a wall/floor/roof/ceiling operation."""
 
     def __init__(self):
+        # Material regime: "wood" (dimensional lumber) or "steel" (cold-formed
+        # steel / CFS). Drives fallback sizing and spacing defaults only --
+        # family/type selection always uses whatever is loaded in the project.
+        self.framing_material = MATERIAL_WOOD
+
         # Stud settings
         self.stud_spacing = SPACING_16OC         # inches
         self.stud_family_name = None              # str - Revit family name
@@ -129,6 +125,7 @@ class FramingConfig(object):
     def to_dict(self):
         """Serialize config to dictionary for JSON persistence."""
         return {
+            "framing_material": self.framing_material,
             "stud_spacing": self.stud_spacing,
             "stud_family_name": self.stud_family_name,
             "stud_type_name": self.stud_type_name,

@@ -21,9 +21,10 @@ from pyrevit import revit, DB, script, forms
 from pyrevit.forms import WPFWindow
 from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
 
-from wf_config import FramingConfig, SPACING_16OC, SPACING_24OC
+from wf_config import FramingConfig, SPACING_12OC, SPACING_16OC, SPACING_24OC
 from wf_families import get_available_types_flat, parse_family_type_label
 from wf_floor import FloorFramingEngine
+from wf_materials import MATERIAL_STEEL, MATERIAL_WOOD
 from wf_tracking import delete_tracked_members_for_hosts
 
 logger = script.get_logger()
@@ -81,7 +82,13 @@ class FrameFloorDialog(WPFWindow):
     def _build_config(self):
         cfg = FramingConfig()
 
-        if self.rb_24oc.IsChecked:
+        cfg.framing_material = (
+            MATERIAL_STEEL if self.rb_material_steel.IsChecked else MATERIAL_WOOD
+        )
+
+        if self.rb_12oc.IsChecked:
+            cfg.stud_spacing = SPACING_12OC
+        elif self.rb_24oc.IsChecked:
             cfg.stud_spacing = SPACING_24OC
         elif self.rb_custom.IsChecked:
             try:
@@ -108,8 +115,10 @@ class FrameFloorDialog(WPFWindow):
     def _save_last(self):
         try:
             data = {
+                "material_steel": bool(self.rb_material_steel.IsChecked),
                 "joist_label": str(self.cb_joist_type.SelectedItem or ""),
                 "rim_label": str(self.cb_rim_type.SelectedItem or ""),
+                "spacing_12": bool(self.rb_12oc.IsChecked),
                 "spacing_16": bool(self.rb_16oc.IsChecked),
                 "spacing_24": bool(self.rb_24oc.IsChecked),
                 "spacing_custom": bool(self.rb_custom.IsChecked),
@@ -130,6 +139,9 @@ class FrameFloorDialog(WPFWindow):
             with open(_CFG_PATH, "r") as cfg_file:
                 data = json.load(cfg_file)
 
+            self.rb_material_steel.IsChecked = bool(data.get("material_steel", False))
+            self.rb_material_wood.IsChecked = not self.rb_material_steel.IsChecked
+
             joist_label = data.get("joist_label", "")
             if joist_label in self._framing_labels:
                 self.cb_joist_type.SelectedItem = joist_label
@@ -138,7 +150,9 @@ class FrameFloorDialog(WPFWindow):
             if rim_label in self._framing_labels:
                 self.cb_rim_type.SelectedItem = rim_label
 
-            if data.get("spacing_24"):
+            if data.get("spacing_12"):
+                self.rb_12oc.IsChecked = True
+            elif data.get("spacing_24"):
                 self.rb_24oc.IsChecked = True
             elif data.get("spacing_custom"):
                 self.rb_custom.IsChecked = True

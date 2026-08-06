@@ -13,6 +13,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
@@ -22,18 +23,28 @@
         </Grid.ColumnDefinitions>
 
         <TextBlock Grid.Row="0" Grid.Column="0"
-                   Text="Joist Family:" VerticalAlignment="Center" Margin="0,4"/>
-        <ComboBox Grid.Row="0" Grid.Column="1"
-                  x:Name="cb_joist_type" Margin="0,4" IsEditable="False"/>
+                   Text="Material:" VerticalAlignment="Center" Margin="0,4"/>
+        <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,4">
+            <RadioButton x:Name="rb_material_wood" Content="Wood" GroupName="material"
+                         IsChecked="True" Margin="0,0,16,0"/>
+            <RadioButton x:Name="rb_material_steel" Content="Steel (CFS)" GroupName="material"/>
+        </StackPanel>
 
         <TextBlock Grid.Row="1" Grid.Column="0"
-                   Text="Rim Family:" VerticalAlignment="Center" Margin="0,4"/>
+                   Text="Joist Family:" VerticalAlignment="Center" Margin="0,4"/>
         <ComboBox Grid.Row="1" Grid.Column="1"
-                  x:Name="cb_rim_type" Margin="0,4" IsEditable="False"/>
+                  x:Name="cb_joist_type" Margin="0,4" IsEditable="False"/>
 
         <TextBlock Grid.Row="2" Grid.Column="0"
+                   Text="Rim Family:" VerticalAlignment="Center" Margin="0,4"/>
+        <ComboBox Grid.Row="2" Grid.Column="1"
+                  x:Name="cb_rim_type" Margin="0,4" IsEditable="False"/>
+
+        <TextBlock Grid.Row="3" Grid.Column="0"
                    Text="Spacing:" VerticalAlignment="Center" Margin="0,8"/>
-        <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,8">
+        <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,8">
+            <RadioButton x:Name="rb_12oc" Content='12&quot; OC' GroupName="spacing"
+                         Margin="0,0,16,0"/>
             <RadioButton x:Name="rb_16oc" Content='16&quot; OC' GroupName="spacing"
                          IsChecked="True" Margin="0,0,16,0"/>
             <RadioButton x:Name="rb_24oc" Content='24&quot; OC' GroupName="spacing"
@@ -44,26 +55,26 @@
             <TextBlock Text=' &quot;' VerticalAlignment="Center"/>
         </StackPanel>
 
-        <TextBlock Grid.Row="3" Grid.Column="0"
+        <TextBlock Grid.Row="4" Grid.Column="0"
                    Text="Direction:" VerticalAlignment="Center" Margin="0,4"/>
-        <ComboBox Grid.Row="3" Grid.Column="1"
+        <ComboBox Grid.Row="4" Grid.Column="1"
                   x:Name="cb_layout_direction" Margin="0,4" IsEditable="False"/>
 
-        <TextBlock Grid.Row="4" Grid.Column="0"
+        <TextBlock Grid.Row="5" Grid.Column="0"
                    Text="Placement:" VerticalAlignment="Center" Margin="0,4"/>
-        <ComboBox Grid.Row="4" Grid.Column="1"
+        <ComboBox Grid.Row="5" Grid.Column="1"
                   x:Name="cb_placement" Margin="0,4" IsEditable="False"/>
 
-        <TextBlock Grid.Row="5" Grid.Column="0"
+        <TextBlock Grid.Row="6" Grid.Column="0"
                    Text="Layout Style:" VerticalAlignment="Center" Margin="0,4"/>
-        <ComboBox Grid.Row="5" Grid.Column="1"
+        <ComboBox Grid.Row="6" Grid.Column="1"
                   x:Name="cb_layout_style" Margin="0,4" IsEditable="False"/>
 
-        <TextBlock Grid.Row="6" Grid.ColumnSpan="2"
+        <TextBlock Grid.Row="7" Grid.ColumnSpan="2"
                    x:Name="tb_summary" Margin="0,10,0,0"
                    TextWrapping="Wrap" FontStyle="Italic" Foreground="Gray"/>
 
-        <StackPanel Grid.Row="7" Grid.ColumnSpan="2"
+        <StackPanel Grid.Row="8" Grid.ColumnSpan="2"
                     Orientation="Horizontal" HorizontalAlignment="Right"
                     Margin="0,14,0,0">
             <Button x:Name="btn_ok" Content="Frame" Width="90" Height="28"

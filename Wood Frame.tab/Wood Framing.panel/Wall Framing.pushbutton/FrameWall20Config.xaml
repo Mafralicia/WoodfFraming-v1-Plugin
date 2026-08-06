@@ -26,6 +26,14 @@
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
 
+        <TextBlock Grid.Row="0" Grid.Column="0"
+                   Text="Material:" VerticalAlignment="Center" Margin="0,4"/>
+        <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,4">
+            <RadioButton x:Name="rb_material_wood" Content="Wood" GroupName="material"
+                         IsChecked="True" Margin="0,0,16,0"/>
+            <RadioButton x:Name="rb_material_steel" Content="Steel (CFS)" GroupName="material"/>
+        </StackPanel>
+
         <TextBlock Grid.Row="1" Grid.Column="0"
                    Text="Stud Type:" VerticalAlignment="Center" Margin="0,4"/>
         <ComboBox Grid.Row="1" Grid.Column="1"
@@ -47,6 +55,8 @@
         <TextBlock Grid.Row="4" Grid.Column="0"
                    Text="Stud Spacing:" VerticalAlignment="Center" Margin="0,6"/>
         <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,6">
+            <RadioButton x:Name="rb_12oc" Content='12&quot; OC' GroupName="spacing"
+                         Margin="0,0,16,0"/>
             <RadioButton x:Name="rb_16oc" Content='16&quot; OC' GroupName="spacing"
                          IsChecked="True" Margin="0,0,16,0"/>
             <RadioButton x:Name="rb_24oc" Content='24&quot; OC' GroupName="spacing"

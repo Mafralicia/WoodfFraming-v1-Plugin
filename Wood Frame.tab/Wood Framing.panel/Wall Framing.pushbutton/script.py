@@ -27,11 +27,13 @@ for m in list(sys.modules.keys()):
 
 from wf_wall_config import (
     FramingConfig,
+    SPACING_12OC,
     SPACING_16OC,
     SPACING_24OC,
     WALL_BASE_MODE_SUPPORT_TOP,
     WALL_BASE_MODE_WALL,
 )
+from wf_materials import MATERIAL_STEEL, MATERIAL_WOOD
 from wf_wall_families import (
     get_available_types_flat,
     get_column_types_flat,
@@ -112,7 +114,13 @@ class WallFraming20Dialog(WPFWindow):
     def _build_config(self):
         config = FramingConfig()
 
-        if self.rb_24oc.IsChecked:
+        config.framing_material = (
+            MATERIAL_STEEL if self.rb_material_steel.IsChecked else MATERIAL_WOOD
+        )
+
+        if self.rb_12oc.IsChecked:
+            config.stud_spacing = SPACING_12OC
+        elif self.rb_24oc.IsChecked:
             config.stud_spacing = SPACING_24OC
         elif self.rb_custom.IsChecked:
             try:
@@ -164,9 +172,11 @@ class WallFraming20Dialog(WPFWindow):
 
     def _save_last(self):
         data = {
+            "material_steel": bool(self.rb_material_steel.IsChecked),
             "stud": str(self.cb_stud_type.SelectedItem or ""),
             "plate": str(self.cb_plate_type.SelectedItem or ""),
             "header": str(self.cb_header_type.SelectedItem or ""),
+            "spacing_12": bool(self.rb_12oc.IsChecked),
             "spacing_16": bool(self.rb_16oc.IsChecked),
             "spacing_24": bool(self.rb_24oc.IsChecked),
             "spacing_custom": bool(self.rb_custom.IsChecked),
@@ -198,11 +208,16 @@ class WallFraming20Dialog(WPFWindow):
         except Exception:
             return
 
+        self.rb_material_steel.IsChecked = bool(data.get("material_steel", False))
+        self.rb_material_wood.IsChecked = not self.rb_material_steel.IsChecked
+
         self._select_if_present(self.cb_stud_type, data.get("stud"))
         self._select_if_present(self.cb_plate_type, data.get("plate"))
         self._select_if_present(self.cb_header_type, data.get("header"))
 
-        if data.get("spacing_24"):
+        if data.get("spacing_12"):
+            self.rb_12oc.IsChecked = True
+        elif data.get("spacing_24"):
             self.rb_24oc.IsChecked = True
         elif data.get("spacing_custom"):
             self.rb_custom.IsChecked = True

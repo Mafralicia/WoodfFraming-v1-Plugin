@@ -20,10 +20,10 @@ Edge classification:
 """
 
 import math
-import re
 
 from wf_geometry import FramingMember, inches_to_feet
-from wf_config import LUMBER_ACTUAL
+from wf_config import MATERIAL_WOOD
+from wf_materials import actual_dims_from_text, fallback_depth_ft, fallback_width_ft
 from wf_host import (
     PlanarHostInfo,
     _extract_face_loops,
@@ -2079,31 +2079,24 @@ class RoofFramingEngine(BaseFramingEngine):
         return "struct" in function
 
     def _resolve_roof_member_size(self, family_name, type_name):
-        """Resolve member thickness and depth from the type or nominal size."""
+        """Resolve member thickness and depth from the type or nominal size (wood or steel)."""
         depth = self.get_type_depth(family_name, type_name)
         width = None
 
-        text = "{0} {1}".format(family_name or "", type_name or "").lower()
-        for nominal, dimensions in LUMBER_ACTUAL.items():
-            if nominal.lower() in text:
-                width = inches_to_feet(dimensions[0])
-                if depth is None or depth <= 0.0:
-                    depth = inches_to_feet(dimensions[1])
-                break
+        text = "{0} {1}".format(family_name or "", type_name or "")
+        dims = actual_dims_from_text(text)
+        if dims is not None:
+            width = inches_to_feet(dims[0])
+            if depth is None or depth <= 0.0:
+                depth = inches_to_feet(dims[1])
 
+        material = getattr(self.config, "framing_material", MATERIAL_WOOD)
         if depth is not None and depth > 0.0:
             if width is None or width <= 0.0:
-                width = PLATE_THICKNESS
+                width = fallback_width_ft(material)
             return width, depth
 
-        match = re.search(r"\b2x(2|3|4|6|8|10|12)\b", text)
-        if match:
-            nominal = "2x{0}".format(match.group(1))
-            dims = LUMBER_ACTUAL.get(nominal)
-            if dims is not None:
-                return inches_to_feet(dims[0]), inches_to_feet(dims[1])
-
-        return PLATE_THICKNESS, 0.0
+        return fallback_width_ft(material), 0.0
 
     def _get_support_elements(self, roof_info):
         from Autodesk.Revit.DB import FilteredElementCollector, Wall, BuiltInCategory, Outline, BoundingBoxIntersectsFilter, XYZ

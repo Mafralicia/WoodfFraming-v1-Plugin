@@ -8,10 +8,9 @@ system workflows instead of direct member patching.
 """
 
 import math
-import re
 
-from wf_config import LUMBER_ACTUAL
 from wf_geometry import FramingMember, inches_to_feet
+from wf_materials import actual_dims_from_text
 from wf_host import analyze_roof_host, _scanline_intervals
 from wf_placement import BaseFramingEngine
 from wf_schedule_utils import apply_bom_metadata
@@ -450,30 +449,14 @@ def _common_z_interval(seg_a_start, seg_a_end, seg_b_start, seg_b_end):
 
 
 def _member_depth_from_text(text):
-    if not text:
-        return None
-
-    match = re.search(r"\b2x(2|3|4|6|8|10|12)\b", text)
-    if not match:
-        return None
-
-    nominal = "2x{0}".format(match.group(1))
-    dims = LUMBER_ACTUAL.get(nominal)
+    dims = actual_dims_from_text(text or "")
     if dims is None:
         return None
     return inches_to_feet(dims[1])
 
 
 def _member_width_from_text(text):
-    if not text:
-        return None
-
-    match = re.search(r"\b2x(2|3|4|6|8|10|12)\b", text)
-    if not match:
-        return None
-
-    nominal = "2x{0}".format(match.group(1))
-    dims = LUMBER_ACTUAL.get(nominal)
+    dims = actual_dims_from_text(text or "")
     if dims is None:
         return None
     return inches_to_feet(dims[0])

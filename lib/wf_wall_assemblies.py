@@ -23,6 +23,13 @@ from wf_wall_topology import (
 
 # ---------------------------------------------------------------------------
 # Shared constants
+#
+# These describe the "typical" member thickness/depth used throughout this
+# file's corner/T-intersection/window/door assembly math. They start out as
+# wood dimensional-lumber defaults, but configure_material_profile() --
+# called once per run from wf_wall_framing_v4.configure_material_profile,
+# which resolves the real selected stud/plate family dimensions -- overwrites
+# them so the same assembly math is correct for steel (or any material) too.
 # ---------------------------------------------------------------------------
 
 PLATE_THICKNESS = inches_to_feet(1.5)
@@ -40,6 +47,25 @@ HEADER_ROTATION = 0.0
 CORNER_FOOTPRINT_PAD = STUD_THICKNESS * 3.0
 # T-intersection footprint half-width on the main wall.
 T_FOOTPRINT_HALF = STUD_THICKNESS * 2.0
+
+
+def configure_material_profile(stud_thickness_ft, plate_thickness_ft, default_depth_ft):
+    """Update this module's shared thickness/depth constants for the run.
+
+    Called once from wf_wall_framing_v4.configure_material_profile() with
+    the resolved (real-symbol-or-material-default) values so corner, T-
+    intersection, and opening assemblies use the same numbers as the rest
+    of the wall engine instead of a hardcoded wood constant.
+    """
+    global PLATE_THICKNESS, STUD_THICKNESS, DEFAULT_LUMBER_DEPTH
+    global DEFAULT_LUMBER_WIDTH, CORNER_FOOTPRINT_PAD, T_FOOTPRINT_HALF
+
+    STUD_THICKNESS = stud_thickness_ft
+    PLATE_THICKNESS = plate_thickness_ft
+    DEFAULT_LUMBER_DEPTH = default_depth_ft
+    DEFAULT_LUMBER_WIDTH = stud_thickness_ft
+    CORNER_FOOTPRINT_PAD = STUD_THICKNESS * 3.0
+    T_FOOTPRINT_HALF = STUD_THICKNESS * 2.0
 
 
 # ---------------------------------------------------------------------------
