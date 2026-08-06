@@ -41,7 +41,6 @@ RIDGE_TOL = inches_to_feet(3.0)
 EDGE_TOL = inches_to_feet(1.0)
 COLLAR_TIE_FRACTION = 1.0 / 3.0
 MAX_COLLAR_TIE_SPACING = inches_to_feet(48.0)
-PLATE_THICKNESS = inches_to_feet(1.5)
 KICKER_FRACTION = 0.25
 PROFILE_MATCH_TOL = inches_to_feet(0.125)
 

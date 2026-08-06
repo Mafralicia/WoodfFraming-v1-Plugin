@@ -49,7 +49,8 @@ CORNER_FOOTPRINT_PAD = STUD_THICKNESS * 3.0
 T_FOOTPRINT_HALF = STUD_THICKNESS * 2.0
 
 
-def configure_material_profile(stud_thickness_ft, plate_thickness_ft, default_depth_ft):
+def configure_material_profile(stud_thickness_ft, plate_thickness_ft, default_depth_ft,
+                                header_ply_spacer_ft=None):
     """Update this module's shared thickness/depth constants for the run.
 
     Called once from wf_wall_framing_v4.configure_material_profile() with
@@ -59,6 +60,7 @@ def configure_material_profile(stud_thickness_ft, plate_thickness_ft, default_de
     """
     global PLATE_THICKNESS, STUD_THICKNESS, DEFAULT_LUMBER_DEPTH
     global DEFAULT_LUMBER_WIDTH, CORNER_FOOTPRINT_PAD, T_FOOTPRINT_HALF
+    global HEADER_PLY_SPACER
 
     STUD_THICKNESS = stud_thickness_ft
     PLATE_THICKNESS = plate_thickness_ft
@@ -66,6 +68,8 @@ def configure_material_profile(stud_thickness_ft, plate_thickness_ft, default_de
     DEFAULT_LUMBER_WIDTH = stud_thickness_ft
     CORNER_FOOTPRINT_PAD = STUD_THICKNESS * 3.0
     T_FOOTPRINT_HALF = STUD_THICKNESS * 2.0
+    if header_ply_spacer_ft is not None:
+        HEADER_PLY_SPACER = header_ply_spacer_ft
 
 
 # ---------------------------------------------------------------------------

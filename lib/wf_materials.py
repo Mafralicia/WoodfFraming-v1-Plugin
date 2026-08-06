@@ -74,31 +74,24 @@ STEEL_ACTUAL = {}
 STEEL_ACTUAL.update(STEEL_STUD_ACTUAL)
 STEEL_ACTUAL.update(STEEL_TRACK_ACTUAL)
 
-# Common structural C-shape steel joist/rafter sizes (depth x flange x mil),
-# used only to seed sensible defaults -- actual placement always prefers the
-# real dimensions of whatever family/type the user selects in the project.
-STEEL_JOIST_ACTUAL = {
-    "6CS162-43": (1.625, 6.0),
-    "8CS162-43": (1.625, 8.0),
-    "9.5CS250-54": (2.5, 9.5),
-    "9.5CS250-68": (2.5, 9.5),
-    "11.5CS250-68": (2.5, 11.5),
-    "11.5CS250-97": (2.5, 11.5),
-}
+# Note on joists/rafters: SSMA's "S" shape letter denotes the C-shape
+# cross-section itself, independent of whether the member is used as a wall
+# stud, floor joist, or rafter -- a structural C-joist named e.g.
+# "950S250-97" (9-1/2" deep, 2.5" flange, 97 mil) decodes correctly through
+# STEEL_ACTUAL / decode_ssma_designation() below with no separate joist
+# table needed. There is no single universal designation format for
+# manufacturer-specific joist catalogs (depths like 9-1/2" and 11-7/8"
+# don't reduce to a clean 3-4 digit hundredths code), so no attempt is made
+# to guess those -- callers fall back to get_material_defaults() instead.
 
-STEEL_STUD_DEFAULT = "350S162-33"
-STEEL_TRACK_DEFAULT = "350T125-33"
-STEEL_JOIST_DEFAULT = "9.5CS250-54"
-
-# Standard on-center spacing options, in inches, by material.
+# Standard on-center spacing options, in inches. All four framing tools'
+# dialogs offer 12"/16"/24" O.C. regardless of material -- 12" O.C. is
+# common for steel but not exclusive to it (heavier wood loads use it too)
+# and 16"/24" are common to both materials, so there's no material-specific
+# subset to encode here; these are just the shared named constants.
 SPACING_12OC = 12.0
 SPACING_16OC = 16.0
 SPACING_24OC = 24.0
-
-SPACING_OPTIONS_IN = {
-    MATERIAL_WOOD: (SPACING_16OC, SPACING_24OC),
-    MATERIAL_STEEL: (SPACING_12OC, SPACING_16OC, SPACING_24OC),
-}
 
 # Broadened structural-framing profile parameter names to try, in order,
 # when reading a member's real cross-section off its Revit FamilySymbol.
@@ -111,25 +104,6 @@ _STEEL_DESIGNATION_RE = re.compile(r"\b(\d{3,4})([STUF])(\d{3})-(\d{2,3})\b", re
 _WOOD_NOMINAL_RE = re.compile(r"\b2x(2|3|4|6|8|10|12)\b", re.IGNORECASE)
 
 
-def looks_like_steel(text):
-    """Heuristic: does a family/type name look like an SSMA steel designation?"""
-    return bool(_STEEL_DESIGNATION_RE.search(text or ""))
-
-
-def looks_like_wood(text):
-    """Heuristic: does a family/type name look like nominal dimensional lumber?"""
-    return bool(_WOOD_NOMINAL_RE.search(text or "")) or any(
-        nominal.lower() in (text or "").lower() for nominal in LUMBER_ACTUAL
-    )
-
-
-def guess_material(text):
-    """Best-effort guess of material from a family/type name string."""
-    if looks_like_steel(text):
-        return MATERIAL_STEEL
-    return MATERIAL_WOOD
-
-
 def decode_ssma_designation(token):
     """Decode a standard SSMA member designation into actual dimensions.
 
@@ -139,6 +113,13 @@ def decode_ssma_designation(token):
     STEEL_ACTUAL catalog above (custom gauges/depths).
 
     Returns (width_in, depth_in) or None if the token doesn't parse.
+
+    Note: despite the "hundredths of an inch" convention, several standard
+    SSMA codes are traditional roundings rather than literal x100 values --
+    e.g. "162" means 1-5/8" (1.625"), not 1.62", and "362" means 3-5/8"
+    (3.625"), not 3.62". Every standard CFS profile is dimensioned in
+    1/8" increments, so the raw x/100 value is snapped to the nearest
+    eighth to recover the true dimension instead of a slightly-short one.
     """
     match = _STEEL_DESIGNATION_RE.match((token or "").strip())
     if not match:
@@ -147,7 +128,15 @@ def decode_ssma_designation(token):
     flange_hundredths = int(match.group(3))
     if depth_hundredths <= 0 or flange_hundredths <= 0:
         return None
-    return (flange_hundredths / 100.0, depth_hundredths / 100.0)
+    return (
+        _snap_to_eighth_inch(flange_hundredths / 100.0),
+        _snap_to_eighth_inch(depth_hundredths / 100.0),
+    )
+
+
+def _snap_to_eighth_inch(value_in):
+    """Round a decimal-inch value to the nearest 1/8" increment."""
+    return round(value_in * 8.0) / 8.0
 
 
 def actual_dims_from_text(text):
@@ -169,11 +158,13 @@ def actual_dims_from_text(text):
         if decoded is not None:
             return decoded
 
-    lowered = text.lower()
-    for nominal, dims in LUMBER_ACTUAL.items():
-        if nominal.lower() in lowered:
-            return dims
-
+    # Word-boundary-anchored match only -- deliberately NOT a loose
+    # substring containment check. An unanchored "is '2x2' in text" test
+    # false-positives on real steel section names that happen to contain
+    # the digits in sequence without being wood at all, e.g. "HSS2X2X1/4"
+    # (a 2"x2" steel tube), "L2x2x1/4" (a steel angle), or "C12x20.7" (a
+    # C-channel matches via "...12x20...") -- all of those would otherwise
+    # silently resolve to wood's 1.5"x1.5" actual dimensions.
     wood_match = _WOOD_NOMINAL_RE.search(text)
     if wood_match:
         nominal = "2x{0}".format(wood_match.group(1))
@@ -187,31 +178,33 @@ def get_material_defaults(material):
     when no real Revit family/type dimension can be resolved at all.
 
     Keys:
-        stud_width_in   -- member thickness used for spacing/collision math
-                            and plate/track stacking (the "b" dimension).
-        stud_depth_in   -- default member depth (the "d" dimension).
-        header_depth_in -- default header/beam depth.
+        stud_width_in       -- member thickness used for spacing/collision
+                                math and plate/track stacking (the "b"
+                                dimension).
+        stud_depth_in       -- default member depth (the "d" dimension).
+        header_depth_in     -- default header/beam depth.
+        header_ply_spacer_in -- gap left between built-up header plies.
+                                Wood commonly sandwiches a 1/2" plywood
+                                shim between doubled solid-sawn header
+                                plies to build the pair out to the wall's
+                                stud depth. Built-up steel headers (back-
+                                to-back or boxed C-shapes) are normally
+                                fastened directly together with no shim,
+                                so this is 0 for steel.
     """
     if material == MATERIAL_STEEL:
         return {
             "stud_width_in": 1.625,
             "stud_depth_in": 3.5,
             "header_depth_in": 6.0,
+            "header_ply_spacer_in": 0.0,
         }
     return {
         "stud_width_in": 1.5,
         "stud_depth_in": 3.5,
         "header_depth_in": 3.5,
+        "header_ply_spacer_in": 0.5,
     }
-
-
-def spacing_options_in(material):
-    """Standard on-center spacing choices (inches) offered for a material."""
-    return SPACING_OPTIONS_IN.get(material, SPACING_OPTIONS_IN[MATERIAL_WOOD])
-
-
-def default_spacing_in(material):
-    return SPACING_16OC
 
 
 def fallback_depth_ft(material, kind="stud"):
@@ -228,3 +221,8 @@ def fallback_depth_ft(material, kind="stud"):
 def fallback_width_ft(material):
     """Material-aware last-resort member width/thickness, in FEET."""
     return get_material_defaults(material)["stud_width_in"] / 12.0
+
+
+def header_ply_spacer_ft(material):
+    """Gap left between built-up header plies for a material, in FEET."""
+    return get_material_defaults(material)["header_ply_spacer_in"] / 12.0

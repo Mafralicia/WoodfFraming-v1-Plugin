@@ -26,6 +26,7 @@ from wf_wall_families import (
     get_column_types_flat,
     parse_family_type_label,
 )
+from wf_materials import MATERIAL_STEEL, MATERIAL_WOOD
 from wf_wall_join_cleanup import (
     JOIN_KIND_CORNER,
     JOIN_KIND_T,
@@ -117,6 +118,9 @@ class WallJoinCleanupDialog(WPFWindow):
 
         config = FramingConfig()
         config.track_members = True
+        config.framing_material = (
+            MATERIAL_STEEL if self.rb_material_steel.IsChecked else MATERIAL_WOOD
+        )
         config.stud_family_name, config.stud_type_name = parse_family_type_label(
             str(stud_label)
         )
@@ -146,6 +150,7 @@ class WallJoinCleanupDialog(WPFWindow):
             data = {}
 
         data.update({
+            "material_steel": bool(self.rb_material_steel.IsChecked),
             "stud": str(self.cb_stud_type.SelectedItem or ""),
             "blocking": str(self.cb_blocking_type.SelectedItem or ""),
         })
@@ -172,6 +177,9 @@ class WallJoinCleanupDialog(WPFWindow):
                 data = json.load(cfg_file)
         except Exception:
             return
+
+        self.rb_material_steel.IsChecked = bool(data.get("material_steel", False))
+        self.rb_material_wood.IsChecked = not self.rb_material_steel.IsChecked
 
         self._select_if_present(self.cb_stud_type, data.get("stud"))
         self._select_if_present(self.cb_blocking_type, data.get("blocking"))

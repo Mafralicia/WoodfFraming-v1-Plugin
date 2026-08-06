@@ -53,6 +53,7 @@ from wf_materials import (
     WIDTH_PARAM_NAMES,
     fallback_depth_ft,
     fallback_width_ft,
+    header_ply_spacer_ft,
 )
 
 
@@ -151,7 +152,8 @@ def configure_material_profile(doc, config):
     OPENING_STUD_COLLISION_TOL = STUD_THICKNESS * 0.45
 
     wf_wall_assemblies.configure_material_profile(
-        STUD_THICKNESS, PLATE_THICKNESS, DEFAULT_LUMBER_DEPTH
+        STUD_THICKNESS, PLATE_THICKNESS, DEFAULT_LUMBER_DEPTH,
+        header_ply_spacer_ft=header_ply_spacer_ft(material),
     )
 
 
@@ -1467,8 +1469,11 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
             return min(max(symbol_depth, STUD_THICKNESS), layer_width)
         return max(symbol_depth, STUD_THICKNESS)
 
-    def _type_depth(self, family, type_name, is_column):
+    def _type_depth(self, family, type_name, is_column, default=None):
         from Autodesk.Revit.DB import BuiltInCategory
+
+        if default is None:
+            default = DEFAULT_LUMBER_DEPTH
 
         category = (
             BuiltInCategory.OST_StructuralColumns
@@ -1479,18 +1484,19 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         if family and type_name:
             symbol = find_family_symbol(self.doc, family, type_name, category)
         if symbol is None:
-            return DEFAULT_LUMBER_DEPTH
+            return default
         for name in DEPTH_PARAM_NAMES:
             value = _lookup_double(symbol, name)
             if value is not None and value > 0.0:
                 return value
-        return DEFAULT_LUMBER_DEPTH
+        return default
 
     def _header_depth(self, family, type_name):
-        depth = self._type_depth(family, type_name, False)
-        if depth > 0.0:
-            return depth
-        return DEFAULT_HEADER_DEPTH
+        # Pass DEFAULT_HEADER_DEPTH explicitly so a header family missing a
+        # depth parameter falls back to the header-sized default (6" for
+        # steel) instead of _type_depth's stud-sized default (3.5") -- those
+        # two defaults happen to be equal for wood, which masked this path.
+        return self._type_depth(family, type_name, False, default=DEFAULT_HEADER_DEPTH)
 
     def _type_width(self, family, type_name, is_column):
         from Autodesk.Revit.DB import BuiltInCategory
