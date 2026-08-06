@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Frame Floor - Main command script."""
+"""Steel Floor Framing - cold-formed steel (CFS) variant of Frame Floor."""
 
 import os
 import sys
@@ -24,6 +24,7 @@ from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
 from wf_config import FramingConfig, SPACING_12OC, SPACING_16OC, SPACING_24OC
 from wf_families import get_available_types_flat, parse_family_type_label
 from wf_floor import FloorFramingEngine
+from wf_materials import MATERIAL_STEEL
 from wf_tracking import delete_tracked_members_for_hosts
 
 logger = script.get_logger()
@@ -33,7 +34,7 @@ _XAML = os.path.join(os.path.dirname(__file__), "FrameFloorConfig.xaml")
 _CFG_PATH = os.path.join(
     os.environ.get("APPDATA", ""),
     "pyRevit",
-    "WoodFraming_FloorLastConfig.json",
+    "WoodFraming_SteelFloorLastConfig.json",
 )
 
 
@@ -52,7 +53,7 @@ class FrameFloorDialog(WPFWindow):
             self.cb_rim_type.SelectedIndex = 0
 
         self.tb_summary.Text = (
-            "Frame {0} floor(s). Joists and rim joists use structural framing families."
+            "Frame {0} floor(s) with steel (CFS) joists and rim track."
             .format(floor_count)
         )
 
@@ -80,6 +81,7 @@ class FrameFloorDialog(WPFWindow):
 
     def _build_config(self):
         cfg = FramingConfig()
+        cfg.framing_material = MATERIAL_STEEL
 
         if self.rb_12oc.IsChecked:
             cfg.stud_spacing = SPACING_12OC
@@ -170,7 +172,7 @@ def main():
         forms.alert(
             "No structural framing families are loaded.\n"
             "Load a framing family before running this command.",
-            title="Wood Framing",
+            title="Steel Framing",
         )
         return
 
@@ -189,7 +191,7 @@ def main():
             return
 
     if not floors:
-        forms.alert("No floors selected.", title="Wood Framing")
+        forms.alert("No floors selected.", title="Steel Framing")
         return
 
     dialog = FrameFloorDialog(doc, len(floors))
@@ -203,7 +205,7 @@ def main():
     total_floors = 0
     deleted_existing = 0
 
-    with revit.Transaction("WF: Frame Floors"):
+    with revit.Transaction("WF: Steel Floor Framing"):
         deleted_existing = delete_tracked_members_for_hosts(
             doc,
             floors,
@@ -219,7 +221,7 @@ def main():
             total_floors += 1
 
     output.print_md(
-        "## Floor Framing Complete\n"
+        "## Steel Floor Framing Complete\n"
         "- **Floors framed:** {0}\n"
         "- **Previous members replaced:** {1}\n"
         "- **Members placed:** {2}".format(

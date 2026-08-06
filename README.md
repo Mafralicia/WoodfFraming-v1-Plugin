@@ -19,12 +19,22 @@ When loaded in Revit, the extension adds a `Wood Framing` tab with a `Wood Frami
 
 ## Wood and steel (CFS) framing
 
-Every framing tool (Wall Framing, Floor Framing, Ceiling Framing, Roof Framing) has a **Material** selector: `Wood` or `Steel (CFS)`.
+Steel (cold-formed steel / CFS) framing has its own **dedicated tools**, separate from the wood tools -- there is no material toggle inside a shared dialog. Each wood tool has a `Steel <Name>` counterpart with its own ribbon button, icon, and dialog:
 
-- **Family/type selection is unchanged either way.** Every tool's family and type dropdowns list whatever structural framing/column families are already loaded in your Revit project, so pick and load your own wood or steel stud/track/joist families as usual -- the extension does not ship its own family content.
-- **The Material toggle affects geometry math and fallback sizing**, not family discovery: stud/track spacing math, plate/track stacking heights, and header/joist depth fallbacks all read the real dimensions off whichever family/type you selected first, and only fall back to material-appropriate defaults (e.g. 1-5/8" CFS stud flange vs. 1-1/2" wood stud thickness) when a family's dimensions can't be read.
+| Wood tool | Steel counterpart |
+| --- | --- |
+| `Wall Framing` | `Steel Wall Framing` |
+| `Floor Framing` | `Steel Floor Framing` |
+| `Ceiling Framing` | `Steel Ceiling Framing` |
+| `Single-Slope Roof Framing` | `Steel Roof Framing` |
+| `Wall Join Cleanup` | `Steel Wall Join Cleanup` |
+
+- **Family/type selection is unchanged between the wood and steel tools.** Every tool's family and type dropdowns list whatever structural framing/column families are already loaded in your Revit project, so pick and load your own wood or steel stud/track/joist families as usual -- the extension does not ship its own family content. Nothing stops you from picking a steel family in a wood tool or vice versa; the buttons only differ in which material's geometry defaults and fallback sizing they use.
+- **The tool you pick affects geometry math and fallback sizing**, not family discovery: stud/track spacing math, plate/track stacking heights, and header/joist depth fallbacks all read the real dimensions off whichever family/type you selected first, and only fall back to material-appropriate defaults (e.g. 1-5/8" CFS stud flange vs. 1-1/2" wood stud thickness) when a family's dimensions can't be read.
 - Steel family/type names in the standard SSMA format (e.g. `350S162-33`, `600T125-54`) are recognized automatically wherever the tools need to infer a nominal size from a name (in addition to wood nominal sizes like `2x6`).
-- Spacing options include 12"/16"/24" O.C. (steel framing commonly uses 12" O.C. in addition to the 16"/24" O.C. common to wood).
+- Spacing options include 12"/16"/24" O.C. on every tool; the steel tools default to 12" O.C. (common for steel), the wood tools default to 16" O.C.
+- The steel dialogs relabel a couple of fields to match CFS terminology (e.g. "Plate Type" becomes "Track Type", "Mid Plates" becomes "Mid Blocking"); the underlying fields and engine behavior are otherwise identical to the wood tools.
+- Each tool remembers its own last-used settings independently (separate per-tool config files), so switching between a wood and a steel tool never clobbers the other's saved settings.
 
 ## Disclaimer
 
@@ -37,10 +47,15 @@ These are the active pyRevit button titles currently defined by the enabled `*.p
 | Tool name in Revit | Bundle folder |
 | --- | --- |
 | `Wall Framing` | `Wall Framing.pushbutton` |
+| `Steel Wall Framing` | `Steel Wall Framing.pushbutton` |
 | `Wall Join Cleanup` | `Wall Join Cleanup.pushbutton` |
+| `Steel Wall Join Cleanup` | `Steel Wall Join Cleanup.pushbutton` |
 | `Floor Framing` | `Frame Floor.pushbutton` |
+| `Steel Floor Framing` | `Steel Floor Framing.pushbutton` |
 | `Ceiling Framing` | `Frame Ceiling.pushbutton` |
+| `Steel Ceiling Framing` | `Steel Ceiling Framing.pushbutton` |
 | `Single-Slope Roof Framing` | `Frame Roof.pushbutton` |
+| `Steel Roof Framing` | `Steel Roof Framing.pushbutton` |
 | `Multi-Slope Roof` | `Frame Multi-Slope Roof.pushbutton` |
 | `Split Sheathing` | `Split Sheathing.pushbutton` |
 | `Number Members` | `Number Members.pushbutton` |

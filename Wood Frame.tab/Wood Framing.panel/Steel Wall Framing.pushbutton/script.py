@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Wall Framing command."""
+"""Steel Wall Framing command -- cold-formed steel (CFS) variant of Wall Framing."""
 
 import json
 import os
@@ -42,16 +42,17 @@ from wf_wall_tracking import get_tracking_data
 from wf_wall_framing_v4 import ENGINE_NAME, WallCavityFramingV4Engine
 from wf_wall_topology import WallTopologyGraph
 from wf_wall_validation import FramingValidator
+from wf_materials import MATERIAL_STEEL
 
 
 logger = script.get_logger()
 output = script.get_output()
-COMMAND_TITLE = "Wall Framing"
+COMMAND_TITLE = "Steel Wall Framing"
 _XAML = os.path.join(os.path.dirname(__file__), "FrameWall20Config.xaml")
 _CFG_PATH = os.path.join(
     os.environ.get("APPDATA", ""),
     "pyRevit",
-    "WoodFraming_Wall20LastConfig.json",
+    "WoodFraming_SteelWall20LastConfig.json",
 )
 
 
@@ -73,7 +74,7 @@ class WallFraming20Dialog(WPFWindow):
             self.cb_header_type.SelectedIndex = 0
 
         self.tb_summary.Text = (
-            "Frame {0} selected wall(s)."
+            "Frame {0} selected wall(s) with steel (CFS) studs and track."
             .format(wall_count)
         )
 
@@ -112,6 +113,7 @@ class WallFraming20Dialog(WPFWindow):
 
     def _build_config(self):
         config = FramingConfig()
+        config.framing_material = MATERIAL_STEEL
 
         if self.rb_12oc.IsChecked:
             config.stud_spacing = SPACING_12OC
@@ -671,7 +673,7 @@ def main():
     topology_summary = ""
     created_views = []
 
-    with revit.Transaction("WF: Wall Framing"):
+    with revit.Transaction("WF: Steel Wall Framing"):
         deleted_counts = _delete_existing_wall_members(
             doc,
             walls,
@@ -836,7 +838,7 @@ def main():
             elevation_links_text += "- {}\n".format(link)
 
     output.print_md(
-        "## Wall Framing Complete\n"
+        "## Steel Wall Framing Complete\n"
         "- **Engine:** {0}\n"
         "- **Walls framed:** {1}\n"
         "- **Walls skipped:** {2}\n"

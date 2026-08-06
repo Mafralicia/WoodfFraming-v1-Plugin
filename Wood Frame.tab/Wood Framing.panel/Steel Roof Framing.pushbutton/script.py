@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Single-slope roof framing for shed roofs."""
+"""Steel Roof Framing - cold-formed steel (CFS) variant of Frame Roof."""
 
 import os
 import sys
@@ -28,6 +28,7 @@ from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
 
 from wf_config import FramingConfig, SPACING_12OC, SPACING_16OC, SPACING_24OC
 from wf_families import get_available_types_flat, parse_family_type_label
+from wf_materials import MATERIAL_STEEL
 from wf_roof import RoofFramingEngine
 from wf_tracking import delete_tracked_members_for_hosts
 
@@ -36,7 +37,7 @@ output = script.get_output()
 _XAML = os.path.join(os.path.dirname(__file__), "FrameRoofConfig.xaml")
 _CFG_PATH = os.path.join(
     os.environ.get("APPDATA", ""),
-    "pyRevit", "WoodFraming_RoofLastConfig.json",
+    "pyRevit", "WoodFraming_SteelRoofLastConfig.json",
 )
 
 
@@ -160,6 +161,7 @@ class FrameRoofDialog(WPFWindow):
         family_ridge = parse_family_type_label(str(ridge_sel)) if ridge_sel else ("", "")
 
         cfg = FramingConfig()
+        cfg.framing_material = MATERIAL_STEEL
         cfg.stud_spacing = truss_sp
         cfg.stud_family_name = family_tc[0]
         cfg.stud_type_name = family_tc[1]
@@ -295,7 +297,7 @@ def main():
         forms.alert(
             "No structural framing families are loaded.\n"
             "Load a framing family before running this command.",
-            title="Wood Framing",
+            title="Steel Framing",
         )
         return
 
@@ -314,7 +316,7 @@ def main():
             return
 
     if not roofs:
-        forms.alert("No roofs selected.", title="Wood Framing")
+        forms.alert("No roofs selected.", title="Steel Framing")
         return
 
     dialog = FrameRoofDialog(doc)
@@ -334,7 +336,7 @@ def main():
     deleted_existing = 0
     errors = []
 
-    with revit.Transaction("WF: Frame Truss Roofs"):
+    with revit.Transaction("WF: Steel Roof Framing"):
         deleted_existing = delete_tracked_members_for_hosts(
             doc,
             roofs,
@@ -384,7 +386,7 @@ def main():
             total_roofs += 1
 
     output.print_md(
-        "## Single-Slope Roof Framing Complete\n"
+        "## Steel Roof Framing Complete\n"
         "- **Roofs framed:** {0}\n"
         "- **Roofs skipped:** {1}\n"
         "- **Previous members replaced:** {2}\n"

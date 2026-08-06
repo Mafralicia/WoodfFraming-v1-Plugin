@@ -1,0 +1,8 @@
+title: Steel Wall Join Cleanup
+tooltip: >-
+  Clean up generated CFS studs near a selected two-wall corner or T
+  intersection and place a selected steel join assembly.
+author: Roi Hason @ Swich Design
+context:
+  any:
+    - OST_Walls

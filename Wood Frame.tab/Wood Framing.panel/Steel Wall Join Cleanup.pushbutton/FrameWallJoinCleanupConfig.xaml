@@ -1,6 +1,6 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Wall Join Cleanup"
+        Title="Steel Wall Join Cleanup"
         Height="320" Width="560"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"

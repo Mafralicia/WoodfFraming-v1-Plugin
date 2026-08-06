@@ -1,0 +1,7 @@
+title: Steel Wall Framing
+tooltip: >-
+  Frame selected walls with cold-formed steel (CFS) studs and track.
+author: Roi Hason @ Swich Design
+context:
+  any:
+    - OST_Walls

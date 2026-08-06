@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Frame Ceiling - Main command script.
-
-Select ceiling hosts and automatically generate ceiling framing
-using structural framing families for joists and rim joists.
-"""
+"""Steel Ceiling Framing - cold-formed steel (CFS) variant of Frame Ceiling."""
 
 import os
 import sys
@@ -39,6 +35,7 @@ from wf_config import (
 )
 from wf_families import get_available_types_flat, parse_family_type_label
 from wf_ceiling import CeilingFramingEngine
+from wf_materials import MATERIAL_STEEL
 from wf_tracking import delete_tracked_members_for_hosts
 
 logger = script.get_logger()
@@ -48,7 +45,7 @@ _XAML = os.path.join(os.path.dirname(__file__), "FrameCeilingConfig.xaml")
 _CFG_PATH = os.path.join(
     os.environ.get("APPDATA", ""),
     "pyRevit",
-    "WoodFraming_CeilingLastConfig.json",
+    "WoodFraming_SteelCeilingLastConfig.json",
 )
 
 
@@ -95,7 +92,7 @@ class FrameCeilingDialog(WPFWindow):
         self.cb_layout_style.SelectedIndex = 0
 
         self.tb_summary.Text = (
-            "Frame {0} ceiling(s). Joists are placed above the ceiling top face by default."
+            "Frame {0} ceiling(s) with steel (CFS) joists, placed above the ceiling top face by default."
             .format(ceiling_count)
         )
 
@@ -123,6 +120,7 @@ class FrameCeilingDialog(WPFWindow):
 
     def _build_config(self):
         cfg = FramingConfig()
+        cfg.framing_material = MATERIAL_STEEL
 
         if self.rb_12oc.IsChecked:
             cfg.stud_spacing = SPACING_12OC
@@ -241,7 +239,7 @@ def main():
             "No Structural Framing families are loaded.\n"
             "Frame Ceiling uses structural framing family types for joists and rim joists.\n"
             "Load a structural framing family before running this command.",
-            title="Wood Framing",
+            title="Steel Framing",
         )
         return
 
@@ -260,7 +258,7 @@ def main():
             return
 
     if not ceilings:
-        forms.alert("No ceilings selected.", title="Wood Framing")
+        forms.alert("No ceilings selected.", title="Steel Framing")
         return
 
     dlg = FrameCeilingDialog(doc, len(ceilings))
@@ -274,7 +272,7 @@ def main():
     total_ceilings = 0
     deleted_existing = 0
 
-    with revit.Transaction("WF: Frame Ceilings"):
+    with revit.Transaction("WF: Steel Ceiling Framing"):
         deleted_existing = delete_tracked_members_for_hosts(
             doc,
             ceilings,
@@ -292,7 +290,7 @@ def main():
             total_ceilings += 1
 
     output.print_md(
-        "## Ceiling Framing Complete\n"
+        "## Steel Ceiling Framing Complete\n"
         "- **Ceilings framed:** {0}\n"
         "- **Previous members replaced:** {1}\n"
         "- **Members placed:** {2}\n"

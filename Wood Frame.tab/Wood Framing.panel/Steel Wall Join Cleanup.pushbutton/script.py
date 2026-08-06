@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Wall Join Cleanup command."""
+"""Steel Wall Join Cleanup command -- cold-formed steel (CFS) variant of Wall Join Cleanup."""
 
 import json
 import os
@@ -26,6 +26,7 @@ from wf_wall_families import (
     get_column_types_flat,
     parse_family_type_label,
 )
+from wf_materials import MATERIAL_STEEL
 from wf_wall_join_cleanup import (
     JOIN_KIND_CORNER,
     JOIN_KIND_T,
@@ -41,12 +42,12 @@ from wf_wall_join_cleanup import (
 
 logger = script.get_logger()
 output = script.get_output()
-COMMAND_TITLE = "Wall Join Cleanup"
+COMMAND_TITLE = "Steel Wall Join Cleanup"
 _XAML = os.path.join(os.path.dirname(__file__), "FrameWallJoinCleanupConfig.xaml")
 _CFG_PATH = os.path.join(
     os.environ.get("APPDATA", ""),
     "pyRevit",
-    "WoodFraming_WallJoinCleanupLastConfig.json",
+    "WoodFraming_SteelWallJoinCleanupLastConfig.json",
 )
 
 CORNER_STYLE_LABELS = [
@@ -117,6 +118,7 @@ class WallJoinCleanupDialog(WPFWindow):
 
         config = FramingConfig()
         config.track_members = True
+        config.framing_material = MATERIAL_STEEL
         config.stud_family_name, config.stud_type_name = parse_family_type_label(
             str(stud_label)
         )
@@ -277,7 +279,7 @@ def main():
         return
 
     try:
-        with revit.Transaction("WF: Wall Join Cleanup"):
+        with revit.Transaction("WF: Steel Wall Join Cleanup"):
             result = cleanup_selected_wall_join(doc, walls, config, style_key)
     except WallJoinCleanupError as exc:
         forms.alert(str(exc), title=COMMAND_TITLE)
@@ -289,7 +291,7 @@ def main():
         warning_text = "\n{0}\n".format(warning_text)
 
     output.print_md(
-        "## Wall Join Cleanup Complete\n"
+        "## Steel Wall Join Cleanup Complete\n"
         "- **Join type:** {0}\n"
         "- **Assembly:** {1}\n"
         "- **Angle:** {2:.1f} degrees\n"
