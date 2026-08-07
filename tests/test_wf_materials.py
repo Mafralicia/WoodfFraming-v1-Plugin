@@ -180,5 +180,47 @@ class WarnUnresolvedSteelDimsTests(unittest.TestCase):
             self.fail("warn_unresolved_steel_dims raised: {0!r}".format(exc))
 
 
+class MmToSpacingInTests(unittest.TestCase):
+    def test_400mm_matches_known_inch_equivalent(self):
+        self.assertAlmostEqual(m.mm_to_spacing_in(m.SPACING_400MM), 15.748, places=3)
+
+    def test_600mm_matches_known_inch_equivalent(self):
+        self.assertAlmostEqual(m.mm_to_spacing_in(m.SPACING_600MM), 23.622, places=3)
+
+    def test_zero_is_zero(self):
+        self.assertEqual(m.mm_to_spacing_in(0.0), 0.0)
+
+
+class PortugueseParamAliasTests(unittest.TestCase):
+    def test_depth_param_names_include_portuguese_aliases(self):
+        self.assertIn("Profundidade", m.DEPTH_PARAM_NAMES)
+        self.assertIn("Altura", m.DEPTH_PARAM_NAMES)
+
+    def test_width_param_names_include_portuguese_alias(self):
+        self.assertIn("Largura", m.WIDTH_PARAM_NAMES)
+
+
+class RevitMaterialHelperTests(unittest.TestCase):
+    # None of these touch a real Revit doc -- Autodesk.Revit.DB is not
+    # importable outside the Revit host, so every helper here must degrade
+    # to a safe, silent no-op rather than raising.
+
+    def test_list_materials_returns_empty_list_outside_revit(self):
+        self.assertEqual(m.list_materials(doc=None), [])
+
+    def test_guess_steel_material_id_returns_none_outside_revit(self):
+        self.assertIsNone(m.guess_steel_material_id(doc=None))
+
+    def test_set_structural_material_false_on_none_symbol(self):
+        self.assertFalse(m.set_structural_material(None, None, "some-id"))
+
+    def test_set_structural_material_false_on_none_material_id(self):
+        self.assertFalse(m.set_structural_material(None, object(), None))
+
+    def test_steel_material_name_hints_cover_portuguese_terms(self):
+        for term in ("aço", "aco", "galvanizado", "metálico"):
+            self.assertIn(term, m.STEEL_MATERIAL_NAME_HINTS)
+
+
 if __name__ == "__main__":
     unittest.main()

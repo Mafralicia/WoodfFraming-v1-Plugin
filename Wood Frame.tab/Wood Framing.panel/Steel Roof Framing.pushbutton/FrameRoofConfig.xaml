@@ -1,7 +1,7 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Steel Roof Framing Configurator"
-        Width="460" Height="580"
+        Width="460" Height="660"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
         Background="#F5F6F8">
@@ -28,6 +28,18 @@
 
         <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
             <StackPanel>
+                <!-- 0. Material -->
+                <GroupBox Header="Material">
+                    <Grid Margin="4">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="150"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Material (Revit):" VerticalAlignment="Center" FontWeight="Normal"/>
+                        <ComboBox x:Name="cb_revit_material" Grid.Column="1" Height="24" IsEditable="False"/>
+                    </Grid>
+                </GroupBox>
+
                 <!-- 1. Framing Style -->
                 <GroupBox Header="Framing Style">
                     <StackPanel Orientation="Horizontal" Margin="4">
@@ -64,25 +76,31 @@
                     <StackPanel>
                         <!-- Truss/Rafter Spacing -->
                         <TextBlock Text="Truss / Rafter Spacing" FontWeight="Bold" Margin="0,4,0,4"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <RadioButton x:Name="rb_truss_12oc" Content='12" OC' GroupName="trussSpacing" Margin="0,0,16,0" FontWeight="Normal"/>
+                            <RadioButton x:Name="rb_truss_16oc" Content='16" OC' GroupName="trussSpacing" Margin="0,0,16,0" FontWeight="Normal"/>
+                            <RadioButton x:Name="rb_truss_24oc" Content='24" OC' GroupName="trussSpacing" IsChecked="True" Margin="0,0,16,0" FontWeight="Normal"/>
+                            <RadioButton x:Name="rb_truss_400mm" Content="400mm" GroupName="trussSpacing" Margin="0,0,16,0" FontWeight="Normal"/>
+                            <RadioButton x:Name="rb_truss_600mm" Content="600mm" GroupName="trussSpacing" FontWeight="Normal"/>
+                        </StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-                            <RadioButton x:Name="rb_truss_12oc" Content='12" OC' Margin="0,0,16,0" FontWeight="Normal"/>
-                            <RadioButton x:Name="rb_truss_16oc" Content='16" OC' Margin="0,0,16,0" FontWeight="Normal"/>
-                            <RadioButton x:Name="rb_truss_24oc" Content='24" OC' IsChecked="True" Margin="0,0,16,0" FontWeight="Normal"/>
-                            <RadioButton x:Name="rb_truss_custom" Content="Custom:" FontWeight="Normal"/>
+                            <RadioButton x:Name="rb_truss_custom" Content="Custom (in):" GroupName="trussSpacing" FontWeight="Normal"/>
                             <TextBox x:Name="tb_truss_custom" Width="50" Margin="4,0,0,0" Text="24" IsEnabled="False" Height="20" VerticalContentAlignment="Center"/>
-                            <TextBlock Text=' "' VerticalAlignment="Center" Margin="2,0,0,0"/>
                         </StackPanel>
 
                         <!-- Ceiling Joist Spacing -->
                         <StackPanel x:Name="sp_ceiling_spacing">
                             <TextBlock Text="Ceiling Joist Spacing" FontWeight="Bold" Margin="0,4,0,4"/>
                             <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-                                <RadioButton x:Name="rb_ceil_12oc" Content='12" OC' Margin="0,0,16,0" FontWeight="Normal"/>
-                                <RadioButton x:Name="rb_ceil_16oc" Content='16" OC' IsChecked="True" Margin="0,0,16,0" FontWeight="Normal"/>
-                                <RadioButton x:Name="rb_ceil_24oc" Content='24" OC' Margin="0,0,16,0" FontWeight="Normal"/>
-                                <RadioButton x:Name="rb_ceil_custom" Content="Custom:" FontWeight="Normal"/>
+                                <RadioButton x:Name="rb_ceil_12oc" Content='12" OC' GroupName="ceilSpacing" Margin="0,0,16,0" FontWeight="Normal"/>
+                                <RadioButton x:Name="rb_ceil_16oc" Content='16" OC' GroupName="ceilSpacing" IsChecked="True" Margin="0,0,16,0" FontWeight="Normal"/>
+                                <RadioButton x:Name="rb_ceil_24oc" Content='24" OC' GroupName="ceilSpacing" Margin="0,0,16,0" FontWeight="Normal"/>
+                                <RadioButton x:Name="rb_ceil_400mm" Content="400mm" GroupName="ceilSpacing" Margin="0,0,16,0" FontWeight="Normal"/>
+                                <RadioButton x:Name="rb_ceil_600mm" Content="600mm" GroupName="ceilSpacing" FontWeight="Normal"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <RadioButton x:Name="rb_ceil_custom" Content="Custom (in):" GroupName="ceilSpacing" FontWeight="Normal"/>
                                 <TextBox x:Name="tb_ceil_custom" Width="50" Margin="4,0,0,0" Text="16" IsEnabled="False" Height="20" VerticalContentAlignment="Center"/>
-                                <TextBlock Text=' "' VerticalAlignment="Center" Margin="2,0,0,0"/>
                             </StackPanel>
                         </StackPanel>
                         <CheckBox x:Name="chk_include_kickers" Content="Include Diagonal Kickers" IsChecked="False" Margin="0,4,0,4" FontWeight="Normal"/>

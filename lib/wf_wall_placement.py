@@ -11,6 +11,7 @@ Cross-section rotation (STRUCTURAL_BEND_DIR_ANGLE) is set as an absolute
 value computed by the framing engine for each member.
 """
 
+from wf_materials import set_structural_material
 from wf_wall_geometry import inches_to_feet
 from wf_wall_families import activate_symbol, find_family_symbol
 from wf_wall_schedule_utils import ensure_bom_parameters, apply_bom_metadata_from_member
@@ -50,12 +51,27 @@ class BaseFramingEngine(object):
         except Exception:
             pass
 
+        target_material_id = getattr(self.config, "target_material_id", None)
+        material_set_symbol_ids = getattr(self, "_material_set_symbol_ids", None)
+        if material_set_symbol_ids is None:
+            material_set_symbol_ids = set()
+            self._material_set_symbol_ids = material_set_symbol_ids
+
         for member in members:
             symbol = self._resolve_symbol(member)
             if symbol is None:
                 continue
 
             activate_symbol(self.doc, symbol)
+
+            if target_material_id is not None:
+                symbol_id = symbol.Id
+                if symbol_id not in material_set_symbol_ids:
+                    material_set_symbol_ids.add(symbol_id)
+                    try:
+                        set_structural_material(self.doc, symbol, target_material_id)
+                    except Exception:
+                        pass
 
             start = member.start_point
             end = member.end_point

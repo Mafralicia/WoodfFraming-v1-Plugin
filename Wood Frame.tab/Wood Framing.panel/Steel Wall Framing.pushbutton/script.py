@@ -42,7 +42,14 @@ from wf_wall_tracking import get_tracking_data
 from wf_wall_framing_v4 import ENGINE_NAME, WallCavityFramingV4Engine
 from wf_wall_topology import WallTopologyGraph
 from wf_wall_validation import FramingValidator
-from wf_materials import MATERIAL_STEEL
+from wf_materials import (
+    MATERIAL_STEEL,
+    SPACING_400MM,
+    SPACING_600MM,
+    guess_steel_material_id,
+    list_materials,
+    mm_to_spacing_in,
+)
 
 
 logger = script.get_logger()
@@ -54,14 +61,26 @@ _CFG_PATH = os.path.join(
     "pyRevit",
     "WoodFraming_SteelWall20LastConfig.json",
 )
+_NO_MATERIAL_CHANGE = "(Don't change)"
 
 
 class WallFraming20Dialog(WPFWindow):
-    def __init__(self, column_types, framing_types, wall_count):
+    def __init__(self, doc, column_types, framing_types, wall_count):
         WPFWindow.__init__(self, _XAML)
         self.result_config = None
         self._column_types = column_types
         self._framing_types = framing_types
+
+        self._material_pairs = list_materials(doc)
+        material_labels = [_NO_MATERIAL_CHANGE] + [name for name, _id in self._material_pairs]
+        self.cb_revit_material.ItemsSource = material_labels
+        self.cb_revit_material.SelectedItem = _NO_MATERIAL_CHANGE
+        guessed_id = guess_steel_material_id(doc)
+        if guessed_id is not None:
+            for name, material_id in self._material_pairs:
+                if material_id == guessed_id:
+                    self.cb_revit_material.SelectedItem = name
+                    break
 
         self.cb_stud_type.ItemsSource = column_types
         self.cb_plate_type.ItemsSource = framing_types
@@ -80,8 +99,11 @@ class WallFraming20Dialog(WPFWindow):
 
         self.rb_custom.Checked += self._on_custom_checked
         self.rb_custom.Unchecked += self._on_custom_unchecked
+        self.rb_12oc.Checked += self._on_custom_unchecked
         self.rb_16oc.Checked += self._on_custom_unchecked
         self.rb_24oc.Checked += self._on_custom_unchecked
+        self.rb_400mm.Checked += self._on_custom_unchecked
+        self.rb_600mm.Checked += self._on_custom_unchecked
         self.chk_mid_plates.Checked += self._on_mid_plates_checked
         self.chk_mid_plates.Unchecked += self._on_mid_plates_unchecked
 
@@ -117,8 +139,14 @@ class WallFraming20Dialog(WPFWindow):
 
         if self.rb_12oc.IsChecked:
             config.stud_spacing = SPACING_12OC
+        elif self.rb_16oc.IsChecked:
+            config.stud_spacing = SPACING_16OC
         elif self.rb_24oc.IsChecked:
             config.stud_spacing = SPACING_24OC
+        elif self.rb_400mm.IsChecked:
+            config.stud_spacing = mm_to_spacing_in(SPACING_400MM)
+        elif self.rb_600mm.IsChecked:
+            config.stud_spacing = mm_to_spacing_in(SPACING_600MM)
         elif self.rb_custom.IsChecked:
             try:
                 config.stud_spacing = float(self.tb_custom_spacing.Text)
@@ -126,7 +154,14 @@ class WallFraming20Dialog(WPFWindow):
                 forms.alert("Invalid custom stud spacing.", title=COMMAND_TITLE)
                 return None
         else:
-            config.stud_spacing = SPACING_16OC
+            config.stud_spacing = SPACING_12OC
+
+        material_sel = self.cb_revit_material.SelectedItem
+        if material_sel and str(material_sel) != _NO_MATERIAL_CHANGE:
+            for name, material_id in self._material_pairs:
+                if name == str(material_sel):
+                    config.target_material_id = material_id
+                    break
 
         stud_sel = self.cb_stud_type.SelectedItem
         if not stud_sel:
@@ -169,12 +204,15 @@ class WallFraming20Dialog(WPFWindow):
 
     def _save_last(self):
         data = {
+            "material": str(self.cb_revit_material.SelectedItem or _NO_MATERIAL_CHANGE),
             "stud": str(self.cb_stud_type.SelectedItem or ""),
             "plate": str(self.cb_plate_type.SelectedItem or ""),
             "header": str(self.cb_header_type.SelectedItem or ""),
             "spacing_12": bool(self.rb_12oc.IsChecked),
             "spacing_16": bool(self.rb_16oc.IsChecked),
             "spacing_24": bool(self.rb_24oc.IsChecked),
+            "spacing_400mm": bool(self.rb_400mm.IsChecked),
+            "spacing_600mm": bool(self.rb_600mm.IsChecked),
             "spacing_custom": bool(self.rb_custom.IsChecked),
             "custom_spacing": self.tb_custom_spacing.Text,
             "single_top": bool(self.rb_single_top.IsChecked),
@@ -204,19 +242,24 @@ class WallFraming20Dialog(WPFWindow):
         except Exception:
             return
 
+        self._select_if_present(self.cb_revit_material, data.get("material"))
         self._select_if_present(self.cb_stud_type, data.get("stud"))
         self._select_if_present(self.cb_plate_type, data.get("plate"))
         self._select_if_present(self.cb_header_type, data.get("header"))
 
-        if data.get("spacing_12"):
-            self.rb_12oc.IsChecked = True
+        if data.get("spacing_16"):
+            self.rb_16oc.IsChecked = True
         elif data.get("spacing_24"):
             self.rb_24oc.IsChecked = True
+        elif data.get("spacing_400mm"):
+            self.rb_400mm.IsChecked = True
+        elif data.get("spacing_600mm"):
+            self.rb_600mm.IsChecked = True
         elif data.get("spacing_custom"):
             self.rb_custom.IsChecked = True
             self.tb_custom_spacing.Text = str(data.get("custom_spacing", "16"))
         else:
-            self.rb_16oc.IsChecked = True
+            self.rb_12oc.IsChecked = True
 
         self.rb_single_top.IsChecked = bool(data.get("single_top", False))
         self.rb_double_top.IsChecked = not self.rb_single_top.IsChecked
@@ -651,7 +694,7 @@ def main():
     if not walls:
         return
 
-    dialog = WallFraming20Dialog(column_types, framing_types, len(walls))
+    dialog = WallFraming20Dialog(doc, column_types, framing_types, len(walls))
     dialog.ShowDialog()
     config = dialog.result_config
     if config is None:

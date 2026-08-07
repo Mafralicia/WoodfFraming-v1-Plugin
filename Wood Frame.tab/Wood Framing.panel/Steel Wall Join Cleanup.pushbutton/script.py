@@ -26,7 +26,7 @@ from wf_wall_families import (
     get_column_types_flat,
     parse_family_type_label,
 )
-from wf_materials import MATERIAL_STEEL
+from wf_materials import MATERIAL_STEEL, guess_steel_material_id, list_materials
 from wf_wall_join_cleanup import (
     JOIN_KIND_CORNER,
     JOIN_KIND_T,
@@ -49,6 +49,7 @@ _CFG_PATH = os.path.join(
     "pyRevit",
     "WoodFraming_SteelWallJoinCleanupLastConfig.json",
 )
+_NO_MATERIAL_CHANGE = "(Don't change)"
 
 CORNER_STYLE_LABELS = [
     ("Insulated corner - two studs", STYLE_CORNER_INSULATED),
@@ -61,8 +62,9 @@ T_STYLE_LABELS = [
 
 
 class WallJoinCleanupDialog(WPFWindow):
-    def __init__(self, column_types, framing_types, relation):
+    def __init__(self, doc, column_types, framing_types, relation):
         WPFWindow.__init__(self, _XAML)
+        self.doc = doc
         self.result_config = None
         self.result_style_key = None
         self._column_types = column_types
@@ -80,6 +82,19 @@ class WallJoinCleanupDialog(WPFWindow):
             self.cb_blocking_type.SelectedIndex = 0
         if self._style_pairs:
             self.cb_assembly.SelectedIndex = 0
+
+        self._material_pairs = list_materials(doc)
+        material_labels = [_NO_MATERIAL_CHANGE] + [
+            name for name, _id in self._material_pairs
+        ]
+        self.cb_revit_material.ItemsSource = material_labels
+        self.cb_revit_material.SelectedItem = _NO_MATERIAL_CHANGE
+        guessed_id = guess_steel_material_id(doc)
+        if guessed_id is not None:
+            for name, material_id in self._material_pairs:
+                if material_id == guessed_id:
+                    self.cb_revit_material.SelectedItem = name
+                    break
 
         self.tb_summary.Text = (
             "{0} detected between the two selected walls. Angle: {1:.1f} degrees."
@@ -127,6 +142,14 @@ class WallJoinCleanupDialog(WPFWindow):
         config.bottom_plate_type_name = type_name
         config.top_plate_family_name = family
         config.top_plate_type_name = type_name
+
+        material_sel = self.cb_revit_material.SelectedItem
+        if material_sel and str(material_sel) != _NO_MATERIAL_CHANGE:
+            for name, material_id in self._material_pairs:
+                if name == str(material_sel):
+                    config.target_material_id = material_id
+                    break
+
         return config
 
     def _selected_style_key(self):
@@ -150,6 +173,9 @@ class WallJoinCleanupDialog(WPFWindow):
         data.update({
             "stud": str(self.cb_stud_type.SelectedItem or ""),
             "blocking": str(self.cb_blocking_type.SelectedItem or ""),
+            "material": str(
+                self.cb_revit_material.SelectedItem or _NO_MATERIAL_CHANGE
+            ),
         })
         selected_assembly = str(self.cb_assembly.SelectedItem or "")
         if self._relation.kind == JOIN_KIND_CORNER:
@@ -177,6 +203,7 @@ class WallJoinCleanupDialog(WPFWindow):
 
         self._select_if_present(self.cb_stud_type, data.get("stud"))
         self._select_if_present(self.cb_blocking_type, data.get("blocking"))
+        self._select_if_present(self.cb_revit_material, data.get("material"))
         if self._relation.kind == JOIN_KIND_CORNER:
             self._select_if_present(self.cb_assembly, data.get("corner_assembly"))
         elif self._relation.kind == JOIN_KIND_T:
@@ -271,7 +298,7 @@ def main():
         forms.alert(str(exc), title=COMMAND_TITLE)
         return
 
-    dialog = WallJoinCleanupDialog(column_types, framing_types, relation)
+    dialog = WallJoinCleanupDialog(doc, column_types, framing_types, relation)
     dialog.ShowDialog()
     config = dialog.result_config
     style_key = dialog.result_style_key

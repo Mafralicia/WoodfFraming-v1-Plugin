@@ -28,7 +28,14 @@ from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
 
 from wf_config import FramingConfig, SPACING_12OC, SPACING_16OC, SPACING_24OC
 from wf_families import get_available_types_flat, parse_family_type_label
-from wf_materials import MATERIAL_STEEL
+from wf_materials import (
+    MATERIAL_STEEL,
+    SPACING_400MM,
+    SPACING_600MM,
+    guess_steel_material_id,
+    list_materials,
+    mm_to_spacing_in,
+)
 from wf_roof import RoofFramingEngine
 from wf_tracking import delete_tracked_members_for_hosts
 
@@ -39,6 +46,7 @@ _CFG_PATH = os.path.join(
     os.environ.get("APPDATA", ""),
     "pyRevit", "WoodFraming_SteelRoofLastConfig.json",
 )
+_NO_MATERIAL_CHANGE = "(Don't change)"
 
 
 class _RoofFilter(ISelectionFilter):
@@ -67,6 +75,19 @@ class FrameRoofDialog(WPFWindow):
             self.cb_web_type.SelectedIndex = min(2, len(self._framing_labels)-1) if len(self._framing_labels) > 2 else 0
             self.cb_ridge_type.SelectedIndex = 0
 
+        self._material_pairs = list_materials(doc)
+        material_labels = [_NO_MATERIAL_CHANGE] + [
+            name for name, _id in self._material_pairs
+        ]
+        self.cb_revit_material.ItemsSource = material_labels
+        self.cb_revit_material.SelectedItem = _NO_MATERIAL_CHANGE
+        guessed_id = guess_steel_material_id(doc)
+        if guessed_id is not None:
+            for name, material_id in self._material_pairs:
+                if material_id == guessed_id:
+                    self.cb_revit_material.SelectedItem = name
+                    break
+
         # Style changed events
         self.rb_style_truss.Checked += self._on_style_changed
         self.rb_style_stick.Checked += self._on_style_changed
@@ -74,9 +95,15 @@ class FrameRoofDialog(WPFWindow):
         # Custom spacing events
         self.rb_truss_custom.Checked += self._on_truss_custom_checked
         self.rb_truss_custom.Unchecked += self._on_truss_custom_unchecked
+        for rb in (self.rb_truss_12oc, self.rb_truss_16oc, self.rb_truss_24oc,
+                   self.rb_truss_400mm, self.rb_truss_600mm):
+            rb.Checked += self._on_truss_custom_unchecked
 
         self.rb_ceil_custom.Checked += self._on_ceil_custom_checked
         self.rb_ceil_custom.Unchecked += self._on_ceil_custom_unchecked
+        for rb in (self.rb_ceil_12oc, self.rb_ceil_16oc, self.rb_ceil_24oc,
+                   self.rb_ceil_400mm, self.rb_ceil_600mm):
+            rb.Checked += self._on_ceil_custom_unchecked
 
         self.btn_ok.Click += self._on_ok
         self.btn_cancel.Click += self._on_cancel
@@ -121,6 +148,10 @@ class FrameRoofDialog(WPFWindow):
             truss_sp = 16.0
         elif self.rb_truss_24oc.IsChecked:
             truss_sp = 24.0
+        elif self.rb_truss_400mm.IsChecked:
+            truss_sp = mm_to_spacing_in(SPACING_400MM)
+        elif self.rb_truss_600mm.IsChecked:
+            truss_sp = mm_to_spacing_in(SPACING_600MM)
         else:
             try:
                 truss_sp = float(self.tb_truss_custom.Text)
@@ -134,6 +165,10 @@ class FrameRoofDialog(WPFWindow):
             ceil_sp = 16.0
         elif self.rb_ceil_24oc.IsChecked:
             ceil_sp = 24.0
+        elif self.rb_ceil_400mm.IsChecked:
+            ceil_sp = mm_to_spacing_in(SPACING_400MM)
+        elif self.rb_ceil_600mm.IsChecked:
+            ceil_sp = mm_to_spacing_in(SPACING_600MM)
         else:
             try:
                 ceil_sp = float(self.tb_ceil_custom.Text)
@@ -180,6 +215,13 @@ class FrameRoofDialog(WPFWindow):
         cfg.family_web_bracing = family_web
         cfg.family_hips_ridges = family_ridge
 
+        material_sel = self.cb_revit_material.SelectedItem
+        if material_sel and str(material_sel) != _NO_MATERIAL_CHANGE:
+            for name, material_id in self._material_pairs:
+                if name == str(material_sel):
+                    cfg.target_material_id = material_id
+                    break
+
         self.result = {
             "config": cfg,
             "mode": style
@@ -203,13 +245,20 @@ class FrameRoofDialog(WPFWindow):
             data["_bc_label"] = str(self.cb_bc_type.SelectedItem or "")
             data["_web_label"] = str(self.cb_web_type.SelectedItem or "")
             data["_ridge_label"] = str(self.cb_ridge_type.SelectedItem or "")
-            
+            data["_material"] = str(
+                self.cb_revit_material.SelectedItem or _NO_MATERIAL_CHANGE
+            )
+
             if self.rb_truss_12oc.IsChecked:
                 data["_truss_sp_state"] = "12"
             elif self.rb_truss_16oc.IsChecked:
                 data["_truss_sp_state"] = "16"
             elif self.rb_truss_24oc.IsChecked:
                 data["_truss_sp_state"] = "24"
+            elif self.rb_truss_400mm.IsChecked:
+                data["_truss_sp_state"] = "400mm"
+            elif self.rb_truss_600mm.IsChecked:
+                data["_truss_sp_state"] = "600mm"
             else:
                 data["_truss_sp_state"] = "custom"
             data["_truss_custom_text"] = self.tb_truss_custom.Text
@@ -220,6 +269,10 @@ class FrameRoofDialog(WPFWindow):
                 data["_ceil_sp_state"] = "16"
             elif self.rb_ceil_24oc.IsChecked:
                 data["_ceil_sp_state"] = "24"
+            elif self.rb_ceil_400mm.IsChecked:
+                data["_ceil_sp_state"] = "400mm"
+            elif self.rb_ceil_600mm.IsChecked:
+                data["_ceil_sp_state"] = "600mm"
             else:
                 data["_ceil_sp_state"] = "custom"
             data["_ceil_custom_text"] = self.tb_ceil_custom.Text
@@ -264,6 +317,13 @@ class FrameRoofDialog(WPFWindow):
             if ridge_label and ridge_label in self._framing_labels:
                 self.cb_ridge_type.SelectedItem = ridge_label
 
+            material_label = data.get("_material", "")
+            if material_label:
+                for name, _id in self._material_pairs:
+                    if name == material_label:
+                        self.cb_revit_material.SelectedItem = name
+                        break
+
             truss_sp_state = data.get("_truss_sp_state", "24")
             if truss_sp_state == "12":
                 self.rb_truss_12oc.IsChecked = True
@@ -271,6 +331,10 @@ class FrameRoofDialog(WPFWindow):
                 self.rb_truss_16oc.IsChecked = True
             elif truss_sp_state == "24":
                 self.rb_truss_24oc.IsChecked = True
+            elif truss_sp_state == "400mm":
+                self.rb_truss_400mm.IsChecked = True
+            elif truss_sp_state == "600mm":
+                self.rb_truss_600mm.IsChecked = True
             else:
                 self.rb_truss_custom.IsChecked = True
                 self.tb_truss_custom.Text = data.get("_truss_custom_text", "24")
@@ -282,6 +346,10 @@ class FrameRoofDialog(WPFWindow):
                 self.rb_ceil_16oc.IsChecked = True
             elif ceil_sp_state == "24":
                 self.rb_ceil_24oc.IsChecked = True
+            elif ceil_sp_state == "400mm":
+                self.rb_ceil_400mm.IsChecked = True
+            elif ceil_sp_state == "600mm":
+                self.rb_ceil_600mm.IsChecked = True
             else:
                 self.rb_ceil_custom.IsChecked = True
                 self.tb_ceil_custom.Text = data.get("_ceil_custom_text", "16")

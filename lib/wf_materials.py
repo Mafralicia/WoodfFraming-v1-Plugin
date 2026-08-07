@@ -93,12 +93,40 @@ SPACING_12OC = 12.0
 SPACING_16OC = 16.0
 SPACING_24OC = 24.0
 
+# Metric on-center spacing options, in MILLIMETERS. 400mm and 600mm are the
+# conventional stud spacings for Brazilian Light Steel Framing (NBR 15253 /
+# NBR 15980) and are common in metric-unit steel framing generally. These
+# are plain numeric presets, not a name-matching scheme -- they just save
+# a metric-project user from typing the inch-equivalent (15.748", 23.622")
+# into the existing custom-spacing field.
+SPACING_400MM = 400.0
+SPACING_600MM = 600.0
+MM_PER_INCH = 25.4
+
+
+def mm_to_spacing_in(mm):
+    """Convert a millimeter spacing value to the inches unit stud_spacing
+    is stored in (Revit internal length is unit-agnostic feet, but this
+    codebase's FramingConfig.stud_spacing field is always inches)."""
+    return mm / MM_PER_INCH
+
+
 # Broadened structural-framing profile parameter names to try, in order,
 # when reading a member's real cross-section off its Revit FamilySymbol.
-# Covers the stock Structural Framing family template ("b"/"d") as well as
-# common alternate names seen on steel/CFS and custom families.
-DEPTH_PARAM_NAMES = ("d", "Depth", "Nominal Depth", "Web Depth", "Height")
-WIDTH_PARAM_NAMES = ("b", "Width", "Nominal Width", "Flange Width")
+# Covers the stock Structural Framing family template ("b"/"d") -- which
+# keeps those literal parameter names regardless of the Revit UI language,
+# including Brazilian-Portuguese Revit installs -- plus common alternate
+# names seen on steel/CFS and custom families, including a few Portuguese
+# labels for families authored with renamed/custom parameters instead of
+# the stock template.
+DEPTH_PARAM_NAMES = (
+    "d", "Depth", "Nominal Depth", "Web Depth", "Height",
+    "Profundidade", "Altura",
+)
+WIDTH_PARAM_NAMES = (
+    "b", "Width", "Nominal Width", "Flange Width",
+    "Largura",
+)
 
 _STEEL_DESIGNATION_RE = re.compile(r"\b(\d{3,4})([STUF])(\d{3})-(\d{2,3})\b", re.IGNORECASE)
 _WOOD_NOMINAL_RE = re.compile(r"\b2x(2|3|4|6|8|10|12)\b", re.IGNORECASE)
@@ -257,3 +285,87 @@ def warn_unresolved_steel_dims(kind_label, family_name, type_name):
         )
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Revit "Material" asset assignment (STRUCTURAL_MATERIAL_PARAM)
+#
+# Everything above this point only affects placement GEOMETRY. It never
+# touches the Revit Material asset (used for rendering, unit weight,
+# thermal/structural analysis, and schedules) -- a placed instance's
+# Material is whatever the loaded family/type already has configured,
+# regardless of which framing_material the engine used for sizing. These
+# functions let a caller who wants steel-sized geometry AND a steel
+# Material asset explicitly assign one, instead of silently inheriting
+# whatever the family happened to be authored with (which could still read
+# as "Wood" in schedules/renders even though the geometry is steel-sized).
+# ---------------------------------------------------------------------------
+
+STEEL_MATERIAL_NAME_HINTS = (
+    "steel", "galvanized", "galvanised", "cfs", "metal stud",
+    "aço", "aco", "galvanizado", "galvanizada", "metálico", "metalico",
+)
+
+
+def list_materials(doc):
+    """List every Material loaded in the project as (name, ElementId) pairs,
+    sorted by name. Returns an empty list outside Revit or on any failure.
+    """
+    try:
+        from Autodesk.Revit.DB import FilteredElementCollector, Material
+    except Exception:
+        return []
+    try:
+        materials = list(FilteredElementCollector(doc).OfClass(Material))
+    except Exception:
+        return []
+    pairs = [(m.Name, m.Id) for m in materials if getattr(m, "Name", None)]
+    pairs.sort(key=lambda pair: pair[0].lower())
+    return pairs
+
+
+def guess_steel_material_id(doc):
+    """Best-effort: find a loaded Revit Material whose name suggests steel
+    (English or Portuguese). Returns its ElementId, or None if nothing in
+    the project matches -- the caller should fall back to asking the user
+    or leaving the Material untouched, not to guessing further.
+    """
+    for name, material_id in list_materials(doc):
+        lowered = name.lower()
+        if any(hint in lowered for hint in STEEL_MATERIAL_NAME_HINTS):
+            return material_id
+    return None
+
+
+def set_structural_material(doc, symbol, material_id):
+    """Set a structural framing/column TYPE's Structural Material parameter
+    to the given Material ElementId.
+
+    This mutates the family TYPE (STRUCTURAL_MATERIAL_PARAM is a type
+    parameter, shared by every instance of that type in the project), not
+    just the instance being placed right now -- callers should only invoke
+    this once per unique symbol per run, not once per placed instance, both
+    to avoid redundant API calls and because setting it repeatedly to the
+    same value is a no-op anyway.
+
+    Returns True if the parameter was found, writable, and changed. Returns
+    False (never raises) if the symbol has no such parameter, it's
+    read-only (some custom families lock it), or it already points at the
+    requested material -- all of those are legitimate, silent no-ops, not
+    errors, since not every structural family exposes this parameter.
+    """
+    if symbol is None or material_id is None:
+        return False
+    try:
+        from Autodesk.Revit.DB import BuiltInParameter
+    except Exception:
+        return False
+    try:
+        param = symbol.get_Parameter(BuiltInParameter.STRUCTURAL_MATERIAL_PARAM)
+        if param is None or param.IsReadOnly:
+            return False
+        if param.AsElementId() == material_id:
+            return False
+        return bool(param.Set(material_id))
+    except Exception:
+        return False

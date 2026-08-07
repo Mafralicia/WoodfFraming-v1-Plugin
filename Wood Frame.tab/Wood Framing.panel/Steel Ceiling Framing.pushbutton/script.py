@@ -35,7 +35,14 @@ from wf_config import (
 )
 from wf_families import get_available_types_flat, parse_family_type_label
 from wf_ceiling import CeilingFramingEngine
-from wf_materials import MATERIAL_STEEL
+from wf_materials import (
+    MATERIAL_STEEL,
+    SPACING_400MM,
+    SPACING_600MM,
+    guess_steel_material_id,
+    list_materials,
+    mm_to_spacing_in,
+)
 from wf_tracking import delete_tracked_members_for_hosts
 
 logger = script.get_logger()
@@ -47,6 +54,7 @@ _CFG_PATH = os.path.join(
     "pyRevit",
     "WoodFraming_SteelCeilingLastConfig.json",
 )
+_NO_MATERIAL_CHANGE = "(Don't change)"
 
 
 def _is_ceiling(element):
@@ -74,6 +82,19 @@ class FrameCeilingDialog(WPFWindow):
             self.cb_joist_type.SelectedIndex = 0
             self.cb_rim_type.SelectedIndex = 0
 
+        self._material_pairs = list_materials(doc)
+        material_labels = [_NO_MATERIAL_CHANGE] + [
+            name for name, _id in self._material_pairs
+        ]
+        self.cb_revit_material.ItemsSource = material_labels
+        self.cb_revit_material.SelectedItem = _NO_MATERIAL_CHANGE
+        guessed_id = guess_steel_material_id(doc)
+        if guessed_id is not None:
+            for name, material_id in self._material_pairs:
+                if material_id == guessed_id:
+                    self.cb_revit_material.SelectedItem = name
+                    break
+
         self.cb_layout_direction.Items.Clear()
         self.cb_layout_direction.Items.Add("Auto (span shorter direction)")
         self.cb_layout_direction.Items.Add("Along local X axis")
@@ -98,6 +119,9 @@ class FrameCeilingDialog(WPFWindow):
 
         self.rb_custom.Checked += self._on_custom_checked
         self.rb_custom.Unchecked += self._on_custom_unchecked
+        for rb in (self.rb_12oc, self.rb_16oc, self.rb_24oc,
+                   self.rb_400mm, self.rb_600mm):
+            rb.Checked += self._on_custom_unchecked
         self.btn_ok.Click += self._on_ok
         self.btn_cancel.Click += self._on_cancel
 
@@ -124,8 +148,14 @@ class FrameCeilingDialog(WPFWindow):
 
         if self.rb_12oc.IsChecked:
             cfg.stud_spacing = SPACING_12OC
+        elif self.rb_16oc.IsChecked:
+            cfg.stud_spacing = SPACING_16OC
         elif self.rb_24oc.IsChecked:
             cfg.stud_spacing = SPACING_24OC
+        elif self.rb_400mm.IsChecked:
+            cfg.stud_spacing = mm_to_spacing_in(SPACING_400MM)
+        elif self.rb_600mm.IsChecked:
+            cfg.stud_spacing = mm_to_spacing_in(SPACING_600MM)
         elif self.rb_custom.IsChecked:
             try:
                 cfg.stud_spacing = float(self.tb_custom_spacing.Text)
@@ -145,6 +175,13 @@ class FrameCeilingDialog(WPFWindow):
             fam, typ = parse_family_type_label(str(rim_sel))
             cfg.bottom_plate_family_name = fam
             cfg.bottom_plate_type_name = typ
+
+        material_sel = self.cb_revit_material.SelectedItem
+        if material_sel and str(material_sel) != _NO_MATERIAL_CHANGE:
+            for name, material_id in self._material_pairs:
+                if name == str(material_sel):
+                    cfg.target_material_id = material_id
+                    break
 
         direction_idx = self.cb_layout_direction.SelectedIndex
         cfg.ceiling_direction_mode = [
@@ -173,9 +210,14 @@ class FrameCeilingDialog(WPFWindow):
             data = {
                 "joist_label": str(self.cb_joist_type.SelectedItem or ""),
                 "rim_label": str(self.cb_rim_type.SelectedItem or ""),
+                "material": str(
+                    self.cb_revit_material.SelectedItem or _NO_MATERIAL_CHANGE
+                ),
                 "spacing_12": bool(self.rb_12oc.IsChecked),
                 "spacing_16": bool(self.rb_16oc.IsChecked),
                 "spacing_24": bool(self.rb_24oc.IsChecked),
+                "spacing_400mm": bool(self.rb_400mm.IsChecked),
+                "spacing_600mm": bool(self.rb_600mm.IsChecked),
                 "spacing_custom": bool(self.rb_custom.IsChecked),
                 "custom_val": self.tb_custom_spacing.Text,
                 "direction_idx": self.cb_layout_direction.SelectedIndex,
@@ -205,6 +247,13 @@ class FrameCeilingDialog(WPFWindow):
             if rim_label in self._framing_labels:
                 self.cb_rim_type.SelectedItem = rim_label
 
+            material_label = data.get("material", "")
+            if material_label:
+                for name, _id in self._material_pairs:
+                    if name == material_label:
+                        self.cb_revit_material.SelectedItem = name
+                        break
+
             direction_idx = data.get("direction_idx", 0)
             if direction_idx in (0, 1, 2, 3):
                 self.cb_layout_direction.SelectedIndex = direction_idx
@@ -221,6 +270,10 @@ class FrameCeilingDialog(WPFWindow):
                 self.rb_12oc.IsChecked = True
             elif data.get("spacing_24"):
                 self.rb_24oc.IsChecked = True
+            elif data.get("spacing_400mm"):
+                self.rb_400mm.IsChecked = True
+            elif data.get("spacing_600mm"):
+                self.rb_600mm.IsChecked = True
             elif data.get("spacing_custom"):
                 self.rb_custom.IsChecked = True
                 self.tb_custom_spacing.Text = str(data.get("custom_val", "16"))
