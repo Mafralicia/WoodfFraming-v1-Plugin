@@ -32,9 +32,11 @@ from wf_materials import (
     MATERIAL_STEEL,
     SPACING_400MM,
     SPACING_600MM,
+    config_profile_labels,
     guess_steel_material_id,
     list_materials,
     mm_to_spacing_in,
+    warn_nbr15253_compliance,
 )
 from wf_roof import RoofFramingEngine
 from wf_tracking import delete_tracked_members_for_hosts
@@ -394,6 +396,10 @@ def main():
 
     config = dialog.result["config"]
     mode = dialog.result["mode"]
+
+    # NBR 15253: flag any selected profile thinner than the
+    # standard's structural minimum before generating framing.
+    warn_nbr15253_compliance(config_profile_labels(config))
 
     engine = RoofFramingEngine(doc, config)
 

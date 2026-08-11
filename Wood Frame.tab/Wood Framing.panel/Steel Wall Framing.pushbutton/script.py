@@ -46,9 +46,11 @@ from wf_materials import (
     MATERIAL_STEEL,
     SPACING_400MM,
     SPACING_600MM,
+    config_profile_labels,
     guess_steel_material_id,
     list_materials,
     mm_to_spacing_in,
+    warn_nbr15253_compliance,
 )
 
 
@@ -699,6 +701,10 @@ def main():
     config = dialog.result_config
     if config is None:
         return
+
+    # NBR 15253: flag any selected profile thinner than the
+    # standard's structural minimum before generating framing.
+    warn_nbr15253_compliance(config_profile_labels(config))
 
     if config.wall_base_mode == WALL_BASE_MODE_SUPPORT_TOP:
         support = _pick_support(doc)

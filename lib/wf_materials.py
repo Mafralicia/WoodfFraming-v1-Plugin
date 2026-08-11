@@ -171,11 +171,21 @@ def actual_dims_from_text(text):
     """Look up (width_in, depth_in) by matching a nominal size embedded in
     free text (typically a "FamilyName TypeName" string).
 
-    Tries steel SSMA designations first (exact catalog hit, then generic
-    decode), then wood nominal dimensional-lumber sizes. Returns None if
-    nothing matches either convention.
+    Tries ABNT/NBR designations first (Brazilian LSF profiles, in mm --
+    see decode_nbr_designation), then steel SSMA designations (exact
+    catalog hit, then generic decode), then wood nominal dimensional-lumber
+    sizes. Returns None if nothing matches any convention.
+
+    ABNT is tried before SSMA because the two notations cannot collide (mm
+    dimensions with an explicit "U"/"Ue" prefix vs. hundredths-of-an-inch
+    with an infix shape letter), and a Brazilian name must never fall
+    through to an American default.
     """
     text = text or ""
+
+    nbr_profile = decode_nbr_designation(text)
+    if nbr_profile is not None:
+        return nbr_profile.width_depth_in()
 
     match = _STEEL_DESIGNATION_RE.search(text)
     if match:
@@ -254,6 +264,326 @@ def fallback_width_ft(material):
 def header_ply_spacer_ft(material):
     """Gap left between built-up header plies for a material, in FEET."""
     return get_material_defaults(material)["header_ply_spacer_in"] / 12.0
+
+
+# ---------------------------------------------------------------------------
+# Brazilian (ABNT/NBR) cold-formed steel profiles and mass take-off
+#
+# Everything above this point resolves member GEOMETRY only. This section
+# adds the two things a Brazilian steel quantity take-off ("quantitativo")
+# actually needs and that geometry alone cannot give you:
+#
+#   1. Profile designations in ABNT form. NBR 6355 (padronizacao de perfis
+#      formados a frio) and NBR 15253 (perfis para painels reticulados /
+#      Light Steel Framing) designate profiles as
+#          Ue <alma> x <mesa> x <enrijecedor> x <espessura>   (montante)
+#          U  <alma> x <mesa> x <espessura>                    (guia)
+#      e.g. "Ue 90x40x12x0,95" and "U 90x40x0,95", in MILLIMETERS and with
+#      the Brazilian decimal comma. None of that parses as SSMA, so before
+#      this existed every Brazilian profile name silently fell through to a
+#      generic American default (1-5/8" x 3-1/2"), which is simply the wrong
+#      member for anything but a coincidental 90mm web.
+#
+#   2. Mass. Steel framing in Brazil is specified, bought and priced by
+#      WEIGHT (kg), not by linear meter -- so a take-off that reports only
+#      count and total length is not commercially usable. Mass is derived
+#      from the flat developed width of the section (the width of the coil
+#      strip the profile is roll-formed from) times the base steel
+#      thickness times the steel density.
+#
+# The mass formula is validated in tests/ against published kg/m values
+# from Brazilian LSF profile tables; it agrees to within ~0.5%.
+# ---------------------------------------------------------------------------
+
+# Density of structural steel. NBR 6355 / NBR 14762 and Brazilian profile
+# tables are all built on 7850 kg/m3.
+STEEL_DENSITY_KG_M3 = 7850.0
+
+# NBR 15253 sets a minimum BASE STEEL thickness (i.e. excluding the zinc
+# coating) for profiles used structurally in light steel framing panels.
+# Thinner sections are non-structural (drywall furring and similar), so a
+# structural model specifying one is worth flagging.
+NBR15253_MIN_STRUCTURAL_THICKNESS_MM = 0.80
+
+# Section shapes, using the ABNT letters.
+SHAPE_LIPPED_CHANNEL = "Ue"   # "U enrijecido" -- montante / stud / joist
+SHAPE_PLAIN_CHANNEL = "U"     # simple channel -- guia / track
+
+# Commercial Brazilian LSF naming ("PGC 90" / "PGU 90" -- Perfil Galvanizado
+# tipo C / tipo U) carries only the web depth. The flange and lip are not in
+# the name because they are effectively fixed across the Brazilian LSF
+# market, so they are supplied here as documented ASSUMPTIONS. This only
+# ever applies as a fallback: a real dimension read off the Revit family
+# always wins. Thickness is deliberately NOT assumed -- see below.
+PG_ASSUMED_FLANGE_MM = 40.0
+PG_ASSUMED_LIP_MM = 12.0
+
+# Nominal stiffening lip for SSMA lipped sections, in inches. SSMA's
+# designation encodes web and flange but not the lip, and the C-shaped stud
+# sections ("S") carry a nominal 1/2" lip. Track ("T") and plain channel
+# ("U") are unstiffened.
+_SSMA_NOMINAL_LIP_IN = {"S": 0.5, "F": 0.5, "T": 0.0, "U": 0.0}
+
+_MM_DECIMAL = r"\d{1,3}(?:[.,]\d{1,2})?"
+_NBR_SEP = r"\s*[x×X]\s*"
+
+_NBR_LIPPED_RE = re.compile(
+    r"\bUe\s*({0}){1}({0}){1}({0}){1}({0})".format(_MM_DECIMAL, _NBR_SEP),
+    re.IGNORECASE | re.UNICODE,
+)
+_NBR_PLAIN_RE = re.compile(
+    r"\bU\s*({0}){1}({0}){1}({0})".format(_MM_DECIMAL, _NBR_SEP),
+    re.IGNORECASE | re.UNICODE,
+)
+_PG_RE = re.compile(r"\bPG([CU])\s*(\d{2,3})\b", re.IGNORECASE)
+
+
+def _mm(text):
+    """Parse a Brazilian-or-international decimal number (mm) to float."""
+    return float(str(text).replace(",", "."))
+
+
+class SteelProfile(object):
+    """A cold-formed steel section, dimensioned in MILLIMETERS.
+
+    thickness_mm is the BASE STEEL thickness (espessura da chapa base,
+    excluding zinc coating), which is what both NBR 6355 designations and
+    published kg/m tables are built on. It may be None when the source
+    designation simply does not carry it (e.g. the commercial "PGC 90"
+    form) -- in that case mass is reported as None rather than guessed,
+    because a fabricated weight in a take-off is worse than a blank one.
+    """
+
+    def __init__(self, shape, web_mm, flange_mm, thickness_mm,
+                 lip_mm=0.0, designation=None):
+        self.shape = shape
+        self.web_mm = web_mm
+        self.flange_mm = flange_mm
+        self.lip_mm = lip_mm or 0.0
+        self.thickness_mm = thickness_mm
+        self.designation = designation
+
+    @property
+    def is_lipped(self):
+        return self.shape == SHAPE_LIPPED_CHANNEL
+
+    @property
+    def developed_width_mm(self):
+        """Flat width of the strip this section is roll-formed from.
+
+        Corner radii shorten the real developed width very slightly; the
+        sharp-corner sum used here is the same convention the published
+        Brazilian profile tables use, and matches them to within ~0.5%.
+        """
+        width = self.web_mm + 2.0 * self.flange_mm
+        if self.is_lipped:
+            width += 2.0 * self.lip_mm
+        return width
+
+    @property
+    def linear_mass_kg_m(self):
+        """Mass per linear meter, in kg/m. None when thickness is unknown."""
+        if not self.thickness_mm or self.thickness_mm <= 0:
+            return None
+        area_m2 = (self.developed_width_mm / 1000.0) * (self.thickness_mm / 1000.0)
+        return area_m2 * STEEL_DENSITY_KG_M3
+
+    @property
+    def meets_nbr15253_structural_thickness(self):
+        """True/False against the NBR 15253 structural minimum, or None if
+        the thickness isn't known and so cannot be judged."""
+        if not self.thickness_mm or self.thickness_mm <= 0:
+            return None
+        # Tolerance absorbs float noise on an exact-minimum 0,80 spec.
+        return self.thickness_mm >= (NBR15253_MIN_STRUCTURAL_THICKNESS_MM - 1e-9)
+
+    def width_depth_in(self):
+        """(flange, web) in INCHES -- the (b, d) convention used by the
+        geometry engines and by actual_dims_from_text()."""
+        return (self.flange_mm / MM_PER_INCH, self.web_mm / MM_PER_INCH)
+
+    def __repr__(self):
+        return "SteelProfile({0!r}, web={1}, flange={2}, lip={3}, t={4})".format(
+            self.shape, self.web_mm, self.flange_mm, self.lip_mm, self.thickness_mm
+        )
+
+
+def decode_nbr_designation(text):
+    """Decode an ABNT/NBR profile designation into a SteelProfile.
+
+    Handles the NBR 6355 / NBR 15253 forms in millimeters, with either a
+    Brazilian decimal comma or a period:
+
+        "Ue 90x40x12x0,95"  -> montante (lipped channel)
+        "U 90x40x0,95"      -> guia (plain channel / track)
+        "PGC 90" / "PGU 90" -> commercial naming, thickness unknown
+
+    Returns None if the text carries no recognizable ABNT designation.
+    """
+    text = text or ""
+
+    # Lipped ("Ue") must be tried before plain ("U") -- "U" is a prefix of
+    # "Ue", so testing plain first would mis-read every montante as a guia.
+    match = _NBR_LIPPED_RE.search(text)
+    if match:
+        web, flange, lip, thickness = (_mm(g) for g in match.groups())
+        if web >= 20.0 and flange > 0:
+            return SteelProfile(
+                SHAPE_LIPPED_CHANNEL, web, flange, thickness,
+                lip_mm=lip, designation=match.group(0).strip(),
+            )
+
+    match = _NBR_PLAIN_RE.search(text)
+    if match:
+        web, flange, thickness = (_mm(g) for g in match.groups())
+        if web >= 20.0 and flange > 0:
+            return SteelProfile(
+                SHAPE_PLAIN_CHANNEL, web, flange, thickness,
+                designation=match.group(0).strip(),
+            )
+
+    match = _PG_RE.search(text)
+    if match:
+        letter = match.group(1).upper()
+        web = float(match.group(2))
+        if web >= 20.0:
+            shape = SHAPE_LIPPED_CHANNEL if letter == "C" else SHAPE_PLAIN_CHANNEL
+            return SteelProfile(
+                shape,
+                web,
+                PG_ASSUMED_FLANGE_MM,
+                None,  # not in the name -- never invented
+                lip_mm=(PG_ASSUMED_LIP_MM if letter == "C" else 0.0),
+                designation=match.group(0).strip(),
+            )
+
+    return None
+
+
+def decode_ssma_profile(token):
+    """Decode an SSMA designation into a SteelProfile (millimeters).
+
+    Unlike decode_ssma_designation(), this keeps the gauge -- the trailing
+    mil value, thousandths of an inch -- which is required for mass.
+    """
+    match = _STEEL_DESIGNATION_RE.search((token or "").strip())
+    if not match:
+        return None
+    dims = decode_ssma_designation(match.group(0))
+    if dims is None:
+        return None
+    flange_in, web_in = dims
+    letter = match.group(2).upper()
+    thickness_mm = (int(match.group(4)) / 1000.0) * MM_PER_INCH
+    return SteelProfile(
+        SHAPE_LIPPED_CHANNEL if _SSMA_NOMINAL_LIP_IN.get(letter) else SHAPE_PLAIN_CHANNEL,
+        web_in * MM_PER_INCH,
+        flange_in * MM_PER_INCH,
+        thickness_mm,
+        lip_mm=_SSMA_NOMINAL_LIP_IN.get(letter, 0.0) * MM_PER_INCH,
+        designation=match.group(0).upper(),
+    )
+
+
+def steel_profile_from_text(text):
+    """Resolve a full SteelProfile from a family/type name, trying ABNT/NBR
+    designations first and then SSMA. Returns None if neither matches."""
+    return decode_nbr_designation(text) or decode_ssma_profile(text)
+
+
+def linear_mass_kg_m_from_text(text):
+    """Convenience: kg/m for a family/type name, or None if it can't be
+    determined (unrecognized designation, or thickness not in the name)."""
+    profile = steel_profile_from_text(text)
+    return profile.linear_mass_kg_m if profile is not None else None
+
+
+# Config field prefixes that carry a selected family/type, with the role
+# label used when reporting on them. Both FramingConfig classes
+# (wf_config and wf_wall_config) share these field names.
+_CONFIG_PROFILE_FIELDS = (
+    ("stud", "Stud / Montante"),
+    ("bottom_plate", "Bottom track / Guia inferior"),
+    ("top_plate", "Top track / Guia superior"),
+    ("header", "Header / Verga"),
+)
+
+
+def config_profile_labels(config):
+    """Extract (role_label, "Family Type") pairs from a FramingConfig.
+
+    Used to feed the NBR 15253 check without each tool having to restate
+    which config fields hold a profile selection.
+    """
+    pairs = []
+    for prefix, role in _CONFIG_PROFILE_FIELDS:
+        family = getattr(config, "{0}_family_name".format(prefix), None)
+        type_name = getattr(config, "{0}_type_name".format(prefix), None)
+        if not family and not type_name:
+            continue
+        pairs.append((role, "{0} {1}".format(family or "", type_name or "").strip()))
+    return pairs
+
+
+def check_nbr15253_compliance(labeled_types):
+    """Check selected profiles against the NBR 15253 structural minimum.
+
+    labeled_types: iterable of (role_label, "Family Type" text) pairs.
+
+    Returns a list of human-readable warning strings -- one per profile
+    whose decoded base steel thickness falls below
+    NBR15253_MIN_STRUCTURAL_THICKNESS_MM. Profiles whose thickness cannot
+    be determined are NOT reported: an unknown thickness is not evidence of
+    non-compliance, and warning on it would train users to ignore the
+    warning. Returns [] when everything checks out.
+    """
+    warnings = []
+    seen = set()
+    for role_label, type_text in labeled_types or ():
+        if not type_text or type_text in seen:
+            continue
+        seen.add(type_text)
+        try:
+            profile = steel_profile_from_text(type_text)
+        except Exception:
+            continue
+        if profile is None:
+            continue
+        if profile.meets_nbr15253_structural_thickness is False:
+            warnings.append(
+                "{0}: '{1}' has a base steel thickness of {2:.2f} mm, below "
+                "the NBR 15253 structural minimum of {3:.2f} mm.".format(
+                    role_label or "Profile",
+                    profile.designation or type_text,
+                    profile.thickness_mm,
+                    NBR15253_MIN_STRUCTURAL_THICKNESS_MM,
+                )
+            )
+    return warnings
+
+
+def warn_nbr15253_compliance(labeled_types):
+    """Print any NBR 15253 thickness warnings for the selected profiles.
+
+    Best-effort and never raises -- safe to call outside Revit/pyRevit.
+    Returns the warning list so callers can react if they want to.
+    """
+    warnings = check_nbr15253_compliance(labeled_types)
+    if not warnings:
+        return warnings
+    try:
+        from pyrevit import script
+
+        body = "\n".join("> - {0}".format(item) for item in warnings)
+        script.get_output().print_md(
+            "\n> **NBR 15253 check:** one or more selected profiles are "
+            "thinner than the standard's structural minimum. Framing was "
+            "still generated -- verify the specification.\n"
+            "{0}".format(body)
+        )
+    except Exception:
+        pass
+    return warnings
 
 
 def warn_unresolved_steel_dims(kind_label, family_name, type_name):

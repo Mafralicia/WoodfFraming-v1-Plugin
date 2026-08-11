@@ -2,6 +2,6 @@
     "name": "WoodFraming",
     "description": "Wood and steel (CFS) framing automation for Autodesk Revit - walls, floors, ceilings, roofs",
     "author": "Roi Hason @ Swich Design",
-    "version": "0.6.0",
+    "version": "0.7.0",
     "type": "extension"
 }

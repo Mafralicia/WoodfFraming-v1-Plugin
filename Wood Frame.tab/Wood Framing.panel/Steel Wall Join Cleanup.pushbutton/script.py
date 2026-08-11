@@ -26,7 +26,13 @@ from wf_wall_families import (
     get_column_types_flat,
     parse_family_type_label,
 )
-from wf_materials import MATERIAL_STEEL, guess_steel_material_id, list_materials
+from wf_materials import (
+    MATERIAL_STEEL,
+    config_profile_labels,
+    guess_steel_material_id,
+    list_materials,
+    warn_nbr15253_compliance,
+)
 from wf_wall_join_cleanup import (
     JOIN_KIND_CORNER,
     JOIN_KIND_T,
@@ -304,6 +310,10 @@ def main():
     style_key = dialog.result_style_key
     if config is None or style_key is None:
         return
+
+    # NBR 15253: flag any selected profile thinner than the
+    # standard's structural minimum before generating framing.
+    warn_nbr15253_compliance(config_profile_labels(config))
 
     try:
         with revit.Transaction("WF: Steel Wall Join Cleanup"):

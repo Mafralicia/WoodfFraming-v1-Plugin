@@ -14,6 +14,7 @@ from wf_wall_host import (
     analyze_roof_host,
     analyze_wall_host,
 )
+from wf_materials import steel_profile_from_text
 from wf_wall_tracking import get_tracking_data
 
 
@@ -27,6 +28,10 @@ PANEL_HEIGHT_FT = 8.0
 PANEL_AREA_SF = PANEL_WIDTH_FT * PANEL_HEIGHT_FT
 AREA_TOL = 1e-6
 LENGTH_TOL = 1e-6
+
+# Revit stores lengths internally in decimal feet; steel mass take-off is
+# metric, so member lengths are converted once here.
+FT_TO_M = 0.3048
 
 
 BOM_PARAMETER_DEFS = (
@@ -101,6 +106,54 @@ BOM_PARAMETER_DEFS = (
         "group": "data",
         "hide_when_no_value": False,
         "description": "Length used for BOM totals.",
+    },
+    {
+        "name": "WF_Profile",
+        "guid": "2118170c-77a3-468b-8496-af2194850d0a",
+        "spec": "text",
+        "categories": (
+            DB.BuiltInCategory.OST_StructuralFraming,
+            DB.BuiltInCategory.OST_StructuralColumns,
+        ),
+        "group": "data",
+        "hide_when_no_value": True,
+        "description": "Decoded steel profile designation (ABNT/NBR or SSMA).",
+    },
+    {
+        "name": "WF_Thickness",
+        "guid": "84094fed-c7a1-4e2f-aa2d-8609bc33d0a9",
+        "spec": "number",
+        "categories": (
+            DB.BuiltInCategory.OST_StructuralFraming,
+            DB.BuiltInCategory.OST_StructuralColumns,
+        ),
+        "group": "data",
+        "hide_when_no_value": True,
+        "description": "Base steel thickness in MILLIMETERS (espessura da chapa base).",
+    },
+    {
+        "name": "WF_LinearMass",
+        "guid": "b54fade2-d446-4967-96f9-330f17ed2bd4",
+        "spec": "number",
+        "categories": (
+            DB.BuiltInCategory.OST_StructuralFraming,
+            DB.BuiltInCategory.OST_StructuralColumns,
+        ),
+        "group": "data",
+        "hide_when_no_value": True,
+        "description": "Profile mass per linear meter, in kg/m.",
+    },
+    {
+        "name": "WF_TotalMass",
+        "guid": "1c89f774-61ea-4af2-a7ca-330173f45384",
+        "spec": "number",
+        "categories": (
+            DB.BuiltInCategory.OST_StructuralFraming,
+            DB.BuiltInCategory.OST_StructuralColumns,
+        ),
+        "group": "data",
+        "hide_when_no_value": False,
+        "description": "Member mass in KILOGRAMS (linear mass x member length).",
     },
 )
 
@@ -402,8 +455,12 @@ def create_or_update_bom_schedule(doc):
         DB.ScheduleFieldType.Instance,
         DB.ElementId(DB.BuiltInParameter.ELEM_FAMILY_AND_TYPE_PARAM),
     )
+    fields["profile"] = _add_shared_field(definition, doc, "WF_Profile")
+    fields["thickness"] = _add_shared_field(definition, doc, "WF_Thickness")
     fields["count"] = definition.AddField(DB.ScheduleFieldType.Count)
     fields["member_length"] = _add_shared_field(definition, doc, "WF_MemberLength")
+    fields["linear_mass"] = _add_shared_field(definition, doc, "WF_LinearMass")
+    fields["total_mass"] = _add_shared_field(definition, doc, "WF_TotalMass")
 
     fields["generated"].IsHidden = True
     fields["host_id"].IsHidden = True
@@ -413,10 +470,20 @@ def create_or_update_bom_schedule(doc):
     fields["family_type"].ColumnHeading = "Family / Type"
     fields["count"].ColumnHeading = "Count"
     fields["member_length"].ColumnHeading = "Total Length"
-    if fields["member_length"].CanTotal():
-        fields["member_length"].DisplayType = DB.ScheduleFieldDisplayType.Totals
+    # Units are named in the headings because these are unitless "number"
+    # parameters. That is deliberate: a unit-typed parameter would make
+    # Revit convert between internal and display units, and a silent
+    # conversion error in a quantity take-off is exactly the failure this
+    # schedule exists to prevent. What is written is what is shown.
+    fields["profile"].ColumnHeading = "Profile"
+    fields["thickness"].ColumnHeading = "Thickness (mm)"
+    fields["linear_mass"].ColumnHeading = "Mass (kg/m)"
+    fields["total_mass"].ColumnHeading = "Total Mass (kg)"
+    for _key in ("member_length", "total_mass"):
+        if fields[_key].CanTotal():
+            fields[_key].DisplayType = DB.ScheduleFieldDisplayType.Totals
 
-    for key in ("host_id", "host_label", "member_role", "family_type"):
+    for key in ("host_id", "host_label", "member_role", "profile", "family_type"):
         definition.AddSortGroupField(
             DB.ScheduleSortGroupField(fields[key].FieldId, DB.ScheduleSortOrder.Ascending)
         )
@@ -818,6 +885,59 @@ def _write_bom_metadata(element, is_generated, host_kind, host_id, host_label,
     _set_shared_text(element, "WF_HostLabel", host_label)
     _set_shared_text(element, "WF_MemberRole", member_role)
     _set_shared_double(element, "WF_MemberLength", member_length_ft or 0.0)
+    _write_steel_quantity_metadata(element, member_length_ft)
+
+
+def _element_type_text(element):
+    """"FamilyName TypeName" for a placed instance, used to decode the
+    steel profile designation. Returns "" when unavailable."""
+    try:
+        symbol = getattr(element, "Symbol", None)
+        if symbol is None:
+            return ""
+        family = getattr(symbol, "Family", None)
+        family_name = getattr(family, "Name", "") if family is not None else ""
+        return "{0} {1}".format(family_name or "", symbol.Name or "").strip()
+    except Exception:
+        return ""
+
+
+def _write_steel_quantity_metadata(element, member_length_ft):
+    """Decode the member's steel profile and stamp thickness and mass.
+
+    Mass is what a Brazilian steel take-off is actually priced on, so it is
+    derived here per instance and summed by the schedule.
+
+    Every value is left at zero / blank when it cannot be established --
+    a non-steel (wood) member, an unrecognized designation, or a profile
+    naming form that carries no thickness (e.g. the commercial "PGC 90").
+    A blank column is a visible prompt to check the family; a fabricated
+    weight would silently corrupt the take-off, so none is ever invented.
+    """
+    blanks = ("WF_Thickness", "WF_LinearMass", "WF_TotalMass")
+    try:
+        profile = steel_profile_from_text(_element_type_text(element))
+    except Exception:
+        profile = None
+
+    if profile is None:
+        _set_shared_text(element, "WF_Profile", None)
+        for name in blanks:
+            _set_shared_double(element, name, 0.0)
+        return
+
+    _set_shared_text(element, "WF_Profile", profile.designation)
+    _set_shared_double(element, "WF_Thickness", profile.thickness_mm or 0.0)
+
+    linear_mass = profile.linear_mass_kg_m
+    if linear_mass is None:
+        for name in ("WF_LinearMass", "WF_TotalMass"):
+            _set_shared_double(element, name, 0.0)
+        return
+
+    _set_shared_double(element, "WF_LinearMass", linear_mass)
+    length_m = (member_length_ft or 0.0) * FT_TO_M
+    _set_shared_double(element, "WF_TotalMass", linear_mass * length_m)
 
 
 def _clear_bom_metadata(element):
@@ -827,6 +947,9 @@ def _clear_bom_metadata(element):
     _set_shared_text(element, "WF_HostLabel", None)
     _set_shared_text(element, "WF_MemberRole", None)
     _set_shared_double(element, "WF_MemberLength", 0.0)
+    _set_shared_text(element, "WF_Profile", None)
+    for _name in ("WF_Thickness", "WF_LinearMass", "WF_TotalMass"):
+        _set_shared_double(element, _name, 0.0)
 
 
 def _has_bom_host_metadata(element):

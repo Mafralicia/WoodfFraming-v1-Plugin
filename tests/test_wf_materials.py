@@ -222,5 +222,217 @@ class RevitMaterialHelperTests(unittest.TestCase):
             self.assertIn(term, m.STEEL_MATERIAL_NAME_HINTS)
 
 
+class NbrDesignationDecodeTests(unittest.TestCase):
+    """ABNT/NBR 6355 / NBR 15253 profile designations, in millimeters."""
+
+    def test_lipped_channel_montante(self):
+        profile = m.decode_nbr_designation("Ue 90x40x12x0,95")
+        self.assertEqual(profile.shape, m.SHAPE_LIPPED_CHANNEL)
+        self.assertEqual(
+            (profile.web_mm, profile.flange_mm, profile.lip_mm, profile.thickness_mm),
+            (90.0, 40.0, 12.0, 0.95),
+        )
+
+    def test_plain_channel_guia(self):
+        profile = m.decode_nbr_designation("U 90x40x0,95")
+        self.assertEqual(profile.shape, m.SHAPE_PLAIN_CHANNEL)
+        self.assertEqual(profile.lip_mm, 0.0)
+        self.assertEqual((profile.web_mm, profile.flange_mm), (90.0, 40.0))
+
+    def test_lipped_is_matched_before_plain(self):
+        # "U" is a prefix of "Ue" -- a plain-channel-first implementation
+        # would silently read every montante as a guia and lose the lip,
+        # under-reporting mass on every stud in the model.
+        profile = m.decode_nbr_designation("Ue 140x40x12x1,25")
+        self.assertEqual(profile.shape, m.SHAPE_LIPPED_CHANNEL)
+        self.assertEqual(profile.lip_mm, 12.0)
+
+    def test_accepts_period_as_well_as_brazilian_comma(self):
+        comma = m.decode_nbr_designation("Ue 90x40x12x0,95")
+        period = m.decode_nbr_designation("Ue 90x40x12x0.95")
+        self.assertEqual(comma.thickness_mm, period.thickness_mm)
+
+    def test_tolerates_spaces_around_separators(self):
+        profile = m.decode_nbr_designation("Montante Ue 90 x 40 x 12 x 0,80")
+        self.assertEqual(profile.web_mm, 90.0)
+        self.assertEqual(profile.thickness_mm, 0.80)
+
+    def test_commercial_pg_naming_has_no_invented_thickness(self):
+        # "PGC 90" carries only the web depth. Inventing a thickness would
+        # produce a confident, wrong weight -- it must stay unknown.
+        profile = m.decode_nbr_designation("PGC 90")
+        self.assertEqual(profile.web_mm, 90.0)
+        self.assertEqual(profile.shape, m.SHAPE_LIPPED_CHANNEL)
+        self.assertIsNone(profile.thickness_mm)
+        self.assertIsNone(profile.linear_mass_kg_m)
+
+    def test_pgu_is_a_plain_channel(self):
+        self.assertEqual(
+            m.decode_nbr_designation("PGU 90").shape, m.SHAPE_PLAIN_CHANNEL
+        )
+
+    def test_non_designation_returns_none(self):
+        for text in ("", None, "2x6", "Generic Framing", "HSS2X2X1/4"):
+            self.assertIsNone(m.decode_nbr_designation(text), repr(text))
+
+    def test_actual_dims_resolves_nbr_instead_of_falling_back(self):
+        # The regression this guards: before ABNT decoding existed, every
+        # Brazilian profile name returned None here and the engines
+        # substituted a generic American default.
+        width_in, depth_in = m.actual_dims_from_text("Ue 140x40x12x0,95")
+        self.assertAlmostEqual(depth_in, 140.0 / 25.4, places=6)
+        self.assertAlmostEqual(width_in, 40.0 / 25.4, places=6)
+
+    def test_wood_still_resolves_after_nbr_was_added(self):
+        self.assertEqual(m.actual_dims_from_text("2x6"), (1.5, 5.5))
+
+
+class LinearMassTests(unittest.TestCase):
+    """Mass is what a Brazilian steel take-off is priced on.
+
+    These reference values come from published Brazilian LSF profile
+    tables; agreement to well under 1% is what makes the derived take-off
+    trustworthy. Corner radii make the real developed width a hair shorter
+    than the sharp-corner sum, which is the entire residual error.
+    """
+
+    PUBLISHED_KG_PER_M = (
+        ("Ue 90x40x12x0,80", 1.22),
+        ("Ue 90x40x12x0,95", 1.45),
+        ("Ue 140x40x12x1,25", 2.39),
+        ("Ue 200x40x12x1,25", 2.98),
+        ("U 90x40x0,95", 1.27),
+    )
+
+    def test_matches_published_profile_tables(self):
+        for designation, published in self.PUBLISHED_KG_PER_M:
+            calculated = m.linear_mass_kg_m_from_text(designation)
+            self.assertIsNotNone(calculated, designation)
+            error_pct = abs(calculated - published) / published * 100.0
+            self.assertLess(
+                error_pct, 1.0,
+                "{0}: calculated {1:.3f} kg/m vs published {2:.2f} kg/m "
+                "({3:.2f}% off)".format(designation, calculated, published, error_pct),
+            )
+
+    def test_developed_width_includes_lips_only_when_lipped(self):
+        lipped = m.decode_nbr_designation("Ue 90x40x12x0,95")
+        plain = m.decode_nbr_designation("U 90x40x0,95")
+        self.assertEqual(lipped.developed_width_mm, 90 + 2 * 40 + 2 * 12)
+        self.assertEqual(plain.developed_width_mm, 90 + 2 * 40)
+
+    def test_mass_is_none_when_thickness_unknown(self):
+        self.assertIsNone(m.linear_mass_kg_m_from_text("PGC 90"))
+
+    def test_mass_is_none_for_unrecognized_text(self):
+        self.assertIsNone(m.linear_mass_kg_m_from_text("Generic Framing"))
+
+    def test_mass_scales_linearly_with_thickness(self):
+        thin = m.linear_mass_kg_m_from_text("Ue 90x40x12x0,80")
+        thick = m.linear_mass_kg_m_from_text("Ue 90x40x12x1,60")
+        self.assertAlmostEqual(thick / thin, 2.0, places=6)
+
+
+class SsmaProfileTests(unittest.TestCase):
+    def test_ssma_profile_now_carries_thickness(self):
+        # The gauge was parsed by the regex and then discarded, which made
+        # any weight take-off impossible for SSMA profiles.
+        profile = m.decode_ssma_profile("350S162-33")
+        self.assertAlmostEqual(profile.thickness_mm, 0.033 * 25.4, places=6)
+        self.assertIsNotNone(profile.linear_mass_kg_m)
+
+    def test_track_decodes_as_plain_channel(self):
+        self.assertEqual(
+            m.decode_ssma_profile("350T125-33").shape, m.SHAPE_PLAIN_CHANNEL
+        )
+
+    def test_stud_decodes_as_lipped_channel(self):
+        self.assertEqual(
+            m.decode_ssma_profile("350S162-33").shape, m.SHAPE_LIPPED_CHANNEL
+        )
+
+    def test_dims_agree_with_the_legacy_tuple_decoder(self):
+        profile = m.decode_ssma_profile("600S162-54")
+        legacy_width_in, legacy_depth_in = m.decode_ssma_designation("600S162-54")
+        self.assertAlmostEqual(profile.web_mm / 25.4, legacy_depth_in, places=6)
+        self.assertAlmostEqual(profile.flange_mm / 25.4, legacy_width_in, places=6)
+
+    def test_non_designation_returns_none(self):
+        self.assertIsNone(m.decode_ssma_profile("Generic Framing"))
+
+
+class Nbr15253ComplianceTests(unittest.TestCase):
+    def test_thickness_at_the_minimum_is_compliant(self):
+        profile = m.decode_nbr_designation("Ue 90x40x12x0,80")
+        self.assertTrue(profile.meets_nbr15253_structural_thickness)
+
+    def test_thickness_below_the_minimum_is_flagged(self):
+        profile = m.decode_nbr_designation("Ue 90x40x12x0,50")
+        self.assertFalse(profile.meets_nbr15253_structural_thickness)
+
+    def test_unknown_thickness_is_undetermined_not_false(self):
+        profile = m.decode_nbr_designation("PGC 90")
+        self.assertIsNone(profile.meets_nbr15253_structural_thickness)
+
+    def test_check_reports_only_genuinely_thin_profiles(self):
+        warnings = m.check_nbr15253_compliance([
+            ("Montante", "Ue 90x40x12x0,50"),
+            ("Guia", "U 90x40x0,95"),
+        ])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Montante", warnings[0])
+
+    def test_unknown_thickness_is_not_reported_as_non_compliant(self):
+        # An undeterminable thickness is not evidence of a violation;
+        # warning on it would train users to ignore the warning.
+        self.assertEqual(m.check_nbr15253_compliance([("Montante", "PGC 90")]), [])
+
+    def test_duplicate_types_reported_once(self):
+        warnings = m.check_nbr15253_compliance([
+            ("Montante", "Ue 90x40x12x0,50"),
+            ("Montante", "Ue 90x40x12x0,50"),
+        ])
+        self.assertEqual(len(warnings), 1)
+
+    def test_clean_selection_yields_no_warnings(self):
+        self.assertEqual(m.check_nbr15253_compliance([
+            ("Montante", "Ue 90x40x12x0,95"),
+            ("Guia", "U 90x40x0,95"),
+        ]), [])
+
+    def test_handles_empty_and_none_input(self):
+        self.assertEqual(m.check_nbr15253_compliance([]), [])
+        self.assertEqual(m.check_nbr15253_compliance(None), [])
+
+    def test_warn_never_raises_outside_revit(self):
+        try:
+            m.warn_nbr15253_compliance([("Montante", "Ue 90x40x12x0,50")])
+        except Exception as exc:  # pragma: no cover - failure path
+            self.fail("warn_nbr15253_compliance raised: {0!r}".format(exc))
+
+
+class ConfigProfileLabelTests(unittest.TestCase):
+    class _Config(object):
+        stud_family_name = "LSF"
+        stud_type_name = "Ue 90x40x12x0,95"
+        bottom_plate_family_name = "LSF"
+        bottom_plate_type_name = "U 90x40x0,95"
+        top_plate_family_name = None
+        top_plate_type_name = None
+        header_family_name = None
+        header_type_name = None
+
+    def test_extracts_only_populated_selections(self):
+        pairs = m.config_profile_labels(self._Config())
+        self.assertEqual(len(pairs), 2)
+        self.assertEqual(pairs[0][1], "LSF Ue 90x40x12x0,95")
+        self.assertEqual(pairs[1][1], "LSF U 90x40x0,95")
+
+    def test_result_feeds_the_compliance_check(self):
+        self.assertEqual(
+            m.check_nbr15253_compliance(m.config_profile_labels(self._Config())), []
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
