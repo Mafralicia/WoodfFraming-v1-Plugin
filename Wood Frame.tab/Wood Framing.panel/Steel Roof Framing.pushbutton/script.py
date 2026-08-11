@@ -42,6 +42,7 @@ from wf_roof import RoofFramingEngine
 from wf_tracking import delete_tracked_members_for_hosts
 
 
+from wf_detail_spec import HOST_ROOF, describe_markdown
 output = script.get_output()
 _XAML = os.path.join(os.path.dirname(__file__), "FrameRoofConfig.xaml")
 _CFG_PATH = os.path.join(
@@ -400,6 +401,12 @@ def main():
     # NBR 15253: flag any selected profile thinner than the
     # standard's structural minimum before generating framing.
     warn_nbr15253_compliance(config_profile_labels(config))
+
+    # Record exactly which members this run will draw, and what it will
+    # not, so the output is a self-contained account of the framing.
+    output.print_md(
+        "### Construction details\n" + describe_markdown(HOST_ROOF, config, mode=mode)
+    )
 
     engine = RoofFramingEngine(doc, config)
 

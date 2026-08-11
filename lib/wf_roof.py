@@ -1509,13 +1509,22 @@ class RoofFramingEngine(BaseFramingEngine):
                 
         if ridge_edges_for_ties and (bool(getattr(self.config, "include_ceiling_joists", True)) or bool(getattr(self.config, "include_king_posts", False))):
             try:
-                # `_make_ceiling_joists` expects: self, planes, ridge_edges, roof_info, spacing, include_kickers=True
+                # The config field is include_roof_kickers -- reading the
+                # shorter "include_kickers" here meant getattr never found
+                # it and silently fell back to True, so the dialog's
+                # "Include Diagonal Kickers" checkbox had no effect and
+                # kickers were always generated. The legacy name is still
+                # accepted second so any caller setting it keeps working.
                 members.extend(self._make_ceiling_joists(
                     planes,
                     ridge_edges_for_ties,
                     roof_info,
                     spacing,
-                    getattr(self.config, "include_kickers", True)
+                    bool(getattr(
+                        self.config,
+                        "include_roof_kickers",
+                        getattr(self.config, "include_kickers", True),
+                    )),
                 ))
             except Exception:
                 pass

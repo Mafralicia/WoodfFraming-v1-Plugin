@@ -46,6 +46,7 @@ from wf_wall_join_cleanup import (
 )
 
 
+from wf_detail_spec import HOST_JOIN, describe_markdown
 logger = script.get_logger()
 output = script.get_output()
 COMMAND_TITLE = "Steel Wall Join Cleanup"
@@ -314,6 +315,12 @@ def main():
     # NBR 15253: flag any selected profile thinner than the
     # standard's structural minimum before generating framing.
     warn_nbr15253_compliance(config_profile_labels(config))
+
+    # Record exactly which members this run will draw, and what it will
+    # not, so the output is a self-contained account of the framing.
+    output.print_md(
+        "### Construction details\n" + describe_markdown(HOST_JOIN, config)
+    )
 
     try:
         with revit.Transaction("WF: Steel Wall Join Cleanup"):

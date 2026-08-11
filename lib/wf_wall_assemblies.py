@@ -544,13 +544,17 @@ class TIntersectionGenerator(object):
 class WindowAssembly(object):
     """Complete framing package for a window opening.
 
-    Always generates:
-    - King studs (left and right)
-    - Jack studs (left and right)
-    - Sill plate
-    - Header (double-ply by default)
-    - Cripple studs above the header
-    - Cripple studs below the sill
+    Generates:
+    - King studs (left and right) -- optional, "King studs"
+    - Jack studs (left and right) -- optional, "Jack studs"
+    - Sill plate                  -- always
+    - Header (double-ply by default) -- always, ply count from header_count
+    - Cripple studs above the header -- optional, "Cripple studs"
+    - Cripple studs below the sill   -- optional, "Cripple studs"
+
+    Note that jack studs are what the header bears on, so switching them
+    off produces an unsupported header. The option is honoured because the
+    dialog offers it, but it is not a normal detail.
     """
 
     def __init__(self, config):
@@ -603,7 +607,12 @@ class WindowAssembly(object):
         jack_right = positions["jack"][1]
 
         # King studs – full height.
-        for d, label in ((king_left, "king_L"), (king_right, "king_R")):
+        # Guarded by the dialog's "King studs" option. Before this guard
+        # existed the option was read only by the retired engines, so the
+        # checkbox had no effect on generated framing.
+        for d, label in (((king_left, "king_L"), (king_right, "king_R"))
+                         if getattr(self.config, "include_king_studs", True)
+                         else ()):
             if 0.0 <= d <= host.length:
                 _, top_z_d = _stud_z_range(host, plate_bottom, plate_top, d)
                 m = _make_vertical(host, MemberKind.KING_STUD, d, bottom_z, top_z_d,
@@ -612,9 +621,12 @@ class WindowAssembly(object):
                     members.append(m)
                     occupied.add(round(d, 4))
 
-        # Jack studs – up to head height.
+        # Jack studs – up to head height. Guarded by the dialog's
+        # "Jack studs" option; see the king stud note above.
         jack_top = host.base_elevation + opening.head_height
-        for d in (jack_left, jack_right):
+        for d in ((jack_left, jack_right)
+                  if getattr(self.config, "include_jack_studs", True)
+                  else ()):
             if 0.0 <= d <= host.length:
                 m = _make_vertical(host, MemberKind.JACK_STUD, d, bottom_z, jack_top,
                                    stud_family, stud_type, True, STUD_THICKNESS, stud_depth)
@@ -750,11 +762,16 @@ class WindowAssembly(object):
 class DoorAssembly(object):
     """Complete framing package for a door opening.
 
-    Always generates:
-    - King studs
-    - Jack studs
-    - Header (double-ply)
-    - Cripple studs above header (if required)
+    Generates:
+    - King studs -- optional, "King studs"
+    - Jack studs -- optional, "Jack studs"
+    - Header (double-ply) -- always, ply count from header_count
+    - Cripple studs above header, when the space calls for them
+      -- optional, "Cripple studs"
+
+    Note that jack studs are what the header bears on, so switching them
+    off produces an unsupported header. The option is honoured because the
+    dialog offers it, but it is not a normal detail.
     """
 
     def __init__(self, config):
@@ -793,8 +810,10 @@ class DoorAssembly(object):
         jack_left = positions["jack"][0]
         jack_right = positions["jack"][1]
 
-        # King studs.
-        for d in (king_left, king_right):
+        # King studs. Guarded by the dialog's "King studs" option.
+        for d in ((king_left, king_right)
+                  if getattr(self.config, "include_king_studs", True)
+                  else ()):
             if 0.0 <= d <= host.length:
                 _, top_z_d = _stud_z_range(host, plate_bottom, plate_top, d)
                 m = _make_vertical(host, MemberKind.KING_STUD, d, bottom_z, top_z_d,
@@ -803,9 +822,11 @@ class DoorAssembly(object):
                     members.append(m)
                     occupied.add(round(d, 4))
 
-        # Jack studs.
+        # Jack studs. Guarded by the dialog's "Jack studs" option.
         jack_top = host.base_elevation + opening.head_height
-        for d in (jack_left, jack_right):
+        for d in ((jack_left, jack_right)
+                  if getattr(self.config, "include_jack_studs", True)
+                  else ()):
             if 0.0 <= d <= host.length:
                 m = _make_vertical(host, MemberKind.JACK_STUD, d, bottom_z, jack_top,
                                    stud_family, stud_type, True, STUD_THICKNESS, stud_depth)

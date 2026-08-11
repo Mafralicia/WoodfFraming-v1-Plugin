@@ -25,6 +25,7 @@ for m in list(sys.modules.keys()):
     if m.startswith("wf_"):
         del sys.modules[m]
 
+from wf_detail_spec import HOST_WALL, describe_markdown, describe_text
 from wf_wall_config import (
     FramingConfig,
     SPACING_12OC,
@@ -110,6 +111,7 @@ class WallFraming20Dialog(WPFWindow):
         self.chk_mid_plates.Unchecked += self._on_mid_plates_unchecked
 
         self._restore_last()
+        self._wire_details_preview()
 
     def _on_custom_checked(self, sender, args):
         self.tb_custom_spacing.IsEnabled = True
@@ -134,6 +136,73 @@ class WallFraming20Dialog(WPFWindow):
     def btn_cancel_click(self, sender, args):
         self.result_config = None
         self.Close()
+
+    def _preview_spacing(self):
+        """Stud spacing implied by the current radio selection, in inches."""
+        if self.rb_12oc.IsChecked:
+            return SPACING_12OC
+        if self.rb_16oc.IsChecked:
+            return SPACING_16OC
+        if self.rb_24oc.IsChecked:
+            return SPACING_24OC
+        if self.rb_400mm.IsChecked:
+            return mm_to_spacing_in(SPACING_400MM)
+        if self.rb_600mm.IsChecked:
+            return mm_to_spacing_in(SPACING_600MM)
+        try:
+            return float(self.tb_custom_spacing.Text)
+        except Exception:
+            return SPACING_16OC
+
+    def _preview_config(self):
+        """Config snapshot used only for the live details pane.
+
+        Deliberately not _build_config(): that one validates input and
+        raises alerts, which must never fire while the user is still
+        moving around the dialog. Anything the dialog does not expose
+        keeps its FramingConfig default, which is what the engine will
+        use anyway.
+        """
+        config = FramingConfig()
+        config.framing_material = MATERIAL_STEEL
+        config.stud_spacing = self._preview_spacing()
+        config.top_plate_count = 1 if self.rb_single_top.IsChecked else 2
+        config.include_mid_plates = bool(self.chk_mid_plates.IsChecked)
+        try:
+            config.mid_plate_interval_ft = float(self.tb_mid_plate_height.Text)
+        except Exception:
+            pass
+        config.include_king_studs = bool(self.chk_king_studs.IsChecked)
+        config.include_jack_studs = bool(self.chk_jack_studs.IsChecked)
+        config.include_cripple_studs = bool(self.chk_cripple_studs.IsChecked)
+        return config
+
+    def _refresh_details(self, sender=None, args=None):
+        """Repaint the "what will be drawn" pane. Never raises -- a
+        preview must not be able to break the dialog."""
+        try:
+            self.tb_details.Text = describe_text(HOST_WALL, self._preview_config())
+        except Exception:
+            pass
+
+    def _wire_details_preview(self):
+        """Refresh the pane whenever any option changes."""
+        for name in ("rb_12oc", "rb_16oc", "rb_24oc", "rb_400mm", "rb_600mm",
+                     "rb_custom", "tb_custom_spacing",
+                     "rb_single_top", "rb_double_top",
+                     "chk_mid_plates", "tb_mid_plate_height",
+                     "chk_king_studs", "chk_jack_studs", "chk_cripple_studs"):
+            control = getattr(self, name, None)
+            if control is None:
+                continue
+            for event_name in ("Checked", "Unchecked", "TextChanged"):
+                handler = getattr(control, event_name, None)
+                if handler is not None:
+                    try:
+                        handler += self._refresh_details
+                    except Exception:
+                        pass
+        self._refresh_details()
 
     def _build_config(self):
         config = FramingConfig()
@@ -705,6 +774,12 @@ def main():
     # NBR 15253: flag any selected profile thinner than the
     # standard's structural minimum before generating framing.
     warn_nbr15253_compliance(config_profile_labels(config))
+
+    # Record exactly which members this run will draw, and what it will
+    # not, so the output is a self-contained account of the framing.
+    output.print_md(
+        "### Construction details\n" + describe_markdown(HOST_WALL, config)
+    )
 
     if config.wall_base_mode == WALL_BASE_MODE_SUPPORT_TOP:
         support = _pick_support(doc)

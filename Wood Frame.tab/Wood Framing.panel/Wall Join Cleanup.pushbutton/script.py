@@ -39,6 +39,7 @@ from wf_wall_join_cleanup import (
 )
 
 
+from wf_detail_spec import HOST_JOIN, describe_markdown
 logger = script.get_logger()
 output = script.get_output()
 COMMAND_TITLE = "Wall Join Cleanup"
@@ -275,6 +276,12 @@ def main():
     style_key = dialog.result_style_key
     if config is None or style_key is None:
         return
+
+    # Record exactly which members this run will draw, and what it will
+    # not, so the output is a self-contained account of the framing.
+    output.print_md(
+        "### Construction details\n" + describe_markdown(HOST_JOIN, config)
+    )
 
     try:
         with revit.Transaction("WF: Wall Join Cleanup"):

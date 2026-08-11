@@ -26,6 +26,7 @@ from wf_families import get_available_types_flat, parse_family_type_label
 from wf_floor import FloorFramingEngine
 from wf_tracking import delete_tracked_members_for_hosts
 
+from wf_detail_spec import HOST_FLOOR, describe_markdown
 logger = script.get_logger()
 output = script.get_output()
 
@@ -197,6 +198,12 @@ def main():
     config = dialog.result
     if config is None:
         return
+
+    # Record exactly which members this run will draw, and what it will
+    # not, so the output is a self-contained account of the framing.
+    output.print_md(
+        "### Construction details\n" + describe_markdown(HOST_FLOOR, config)
+    )
 
     engine = FloorFramingEngine(doc, config)
     total_placed = 0
