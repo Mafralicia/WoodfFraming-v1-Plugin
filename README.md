@@ -47,6 +47,13 @@ Steel (cold-formed steel / CFS) framing has its own **dedicated tools**, separat
 - **Mass columns are unitless `number` parameters with the unit named in the heading.** This is deliberate: a unit-typed parameter would make Revit convert between internal and display units, and a silent conversion error is exactly the failure a quantity take-off cannot absorb. What is written is what is shown.
 - **NBR 15253 minimum thickness is checked.** Every steel tool warns before generating framing if a selected profile's base steel thickness falls below the standard's structural minimum. A thickness that cannot be determined is not reported — an unknown value is not evidence of a violation.
 - Thickness throughout is the **base steel thickness** (espessura da chapa base, excluding the zinc coating), which is the basis both NBR 6355 designations and published kg/m tables use.
+
+### Brazilian Wood Frame sections and volume take-off
+
+- **Metric lumber sections are decoded natively.** Brazilian Wood Frame names sections by their *actual* milled size in millimeters — `38x90`, `38x140`, `38x190`, `38x240`, `45x90`, `45x140` — so unlike the North American `2x4` convention there is no nominal-to-actual translation. Sizes outside the standard ladder still resolve; the guards only reject implausible sections.
+- **The BOM reports volume in m³ for timber**, because lumber in Brazil is bought and priced by the cubic meter exactly as steel is by the kilogram. Volume is taken from the member's real cross-section (read off the family type's `b`/`d`, or `Largura`/`Altura`, parameters — falling back to decoding the type name) times its length.
+- **Each member carries the quantity it is actually purchased by**: a recognized steel profile gets mass and leaves volume blank; everything else is treated as sawn timber and gets volume. Volume is written only for solid rectangular sections, since for a thin-walled steel profile the same multiplication would describe the bounding box rather than any real quantity.
+- **Steel designations are never mistaken for lumber.** A name like `Ue 90x40x12x0,95` contains a digit pair that would otherwise read as a 90×40 mm timber, so the steel notations are always resolved first; imperial section names (`C12x20.7`, `HSS2X2X1/4`) are rejected by dimensional guards.
 - Each tool remembers its own last-used settings independently (separate per-tool config files), so switching between a wood and a steel tool never clobbers the other's saved settings.
 
 ## Disclaimer

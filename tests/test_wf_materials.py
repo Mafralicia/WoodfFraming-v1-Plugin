@@ -411,6 +411,69 @@ class Nbr15253ComplianceTests(unittest.TestCase):
             self.fail("warn_nbr15253_compliance raised: {0!r}".format(exc))
 
 
+class MetricLumberTests(unittest.TestCase):
+    """Brazilian Wood Frame sections, named by actual size in millimeters."""
+
+    BRAZILIAN_SECTIONS = (
+        ("38x90", 38.0, 90.0),
+        ("38x140", 38.0, 140.0),
+        ("38x190", 38.0, 190.0),
+        ("38x240", 38.0, 240.0),
+        ("45x90", 45.0, 90.0),
+        ("45x140", 45.0, 140.0),
+    )
+
+    def test_standard_sections_decode_to_actual_millimeters(self):
+        for text, thickness_mm, depth_mm in self.BRAZILIAN_SECTIONS:
+            width_in, depth_in = m.decode_metric_lumber(text)
+            self.assertAlmostEqual(width_in * 25.4, thickness_mm, places=6, msg=text)
+            self.assertAlmostEqual(depth_in * 25.4, depth_mm, places=6, msg=text)
+
+    def test_resolves_through_actual_dims_from_text(self):
+        width_in, depth_in = m.actual_dims_from_text("Montante 38x90mm")
+        self.assertAlmostEqual(width_in * 25.4, 38.0, places=6)
+        self.assertAlmostEqual(depth_in * 25.4, 90.0, places=6)
+
+    def test_tolerates_spaces_around_separator(self):
+        self.assertIsNotNone(m.decode_metric_lumber("Pinus 38 x 140"))
+
+    def test_steel_designations_are_never_read_as_lumber(self):
+        # The ordering guarantee in actual_dims_from_text: a designated
+        # steel profile must resolve as steel, not as a 90x40 timber.
+        for designation in ("Ue 90x40x12x0,95", "U 90x40x0,95", "PGC 90"):
+            self.assertIsNotNone(m.steel_profile_from_text(designation), designation)
+            expected = m.steel_profile_from_text(designation).width_depth_in()
+            self.assertEqual(m.actual_dims_from_text(designation), expected, designation)
+
+    def test_imperial_steel_section_names_are_rejected(self):
+        # These carry digit pairs that would look like a millimeter section
+        # if the dimensional guards were not applied.
+        for text in ("HSS2X2X1/4", "C12x20.7", "W12X26", "L2x2x1/4"):
+            self.assertIsNone(m.decode_metric_lumber(text), text)
+
+    def test_us_nominal_lumber_still_wins_for_2x_names(self):
+        self.assertEqual(m.actual_dims_from_text("2x6"), (1.5, 5.5))
+        self.assertEqual(m.actual_dims_from_text("2x10"), (1.5, 9.25))
+
+    def test_rejects_sections_outside_structural_range(self):
+        self.assertIsNone(m.decode_metric_lumber("10x20"))     # far too small
+        self.assertIsNone(m.decode_metric_lumber("500x900"))   # far too large
+
+    def test_rejects_thickness_greater_than_depth(self):
+        # Lumber is never named deeper-face-first.
+        self.assertIsNone(m.decode_metric_lumber("140x38"))
+
+    def test_empty_and_none_return_none(self):
+        for text in ("", None, "Generic Framing"):
+            self.assertIsNone(m.decode_metric_lumber(text), repr(text))
+
+    def test_documented_size_ladder_is_self_consistent(self):
+        for thickness in m.WOOD_METRIC_THICKNESSES_MM:
+            for depth in m.WOOD_METRIC_DEPTHS_MM:
+                text = "{0:.0f}x{1:.0f}".format(thickness, depth)
+                self.assertIsNotNone(m.decode_metric_lumber(text), text)
+
+
 class ConfigProfileLabelTests(unittest.TestCase):
     class _Config(object):
         stud_family_name = "LSF"

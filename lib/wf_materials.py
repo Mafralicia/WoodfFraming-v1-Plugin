@@ -131,6 +131,28 @@ WIDTH_PARAM_NAMES = (
 _STEEL_DESIGNATION_RE = re.compile(r"\b(\d{3,4})([STUF])(\d{3})-(\d{2,3})\b", re.IGNORECASE)
 _WOOD_NOMINAL_RE = re.compile(r"\b2x(2|3|4|6|8|10|12)\b", re.IGNORECASE)
 
+# Brazilian Wood Frame lumber, in MILLIMETERS. Unlike the North American
+# "2x" convention -- where the nominal name and the actual milled size
+# differ (a "2x4" is really 1-1/2" x 3-1/2") -- Brazilian sections are
+# named by their ACTUAL dimensions, so "38x90" really is 38 mm x 90 mm and
+# needs no nominal-to-actual translation. 38 mm and 45 mm are the two
+# structural thicknesses in common use; the depths below are the standard
+# ladder. Sizes are matched generically by the regex, so a section outside
+# this list still resolves -- the constants exist to document the range.
+WOOD_METRIC_THICKNESSES_MM = (38.0, 45.0)
+WOOD_METRIC_DEPTHS_MM = (90.0, 140.0, 190.0, 240.0)
+
+# Guard rails: a plausible structural lumber section, used to reject
+# coincidental digit pairs in a family name (a "2x4" must not be read as
+# 2 mm x 4 mm, and a year or a code must not be read as a section).
+_WOOD_METRIC_MIN_MM = 20.0
+_WOOD_METRIC_MAX_MM = 400.0
+
+_WOOD_METRIC_RE = re.compile(
+    r"\b(\d{2,3}(?:[.,]\d)?)\s*[x×X]\s*(\d{2,3}(?:[.,]\d)?)\s*(?:mm\b)?",
+    re.UNICODE,
+)
+
 
 def decode_ssma_designation(token):
     """Decode a standard SSMA member designation into actual dimensions.
@@ -208,7 +230,48 @@ def actual_dims_from_text(text):
         nominal = "2x{0}".format(wood_match.group(1))
         return LUMBER_ACTUAL.get(nominal)
 
-    return None
+    # Brazilian Wood Frame sections ("38x90"), tried last so that a steel
+    # designation is never mistaken for lumber -- see decode_metric_lumber.
+    return decode_metric_lumber(text)
+
+
+def decode_metric_lumber(text):
+    """Decode a Brazilian Wood Frame lumber section into (width_in, depth_in).
+
+    Brazilian sections are named by their ACTUAL milled dimensions in
+    millimeters -- "38x90" is 38 mm x 90 mm -- so unlike the North American
+    "2x4" convention there is no nominal-to-actual translation step.
+
+    Returns None when the text carries no plausible lumber section.
+
+    On ambiguity: a bare "90x40" could in principle be either a lumber
+    section or a steel profile written without its "U"/"Ue" prefix. Callers
+    resolve this by ordering -- actual_dims_from_text() tries the steel
+    notations first, so a properly designated profile is never mistaken for
+    lumber. The dimensional guards below reject the other realistic
+    confusions (imperial names like "C12x20.7" or "HSS2X2X1/4", whose
+    numbers fall outside any structural-lumber range in millimeters).
+    """
+    match = _WOOD_METRIC_RE.search(text or "")
+    if not match:
+        return None
+
+    try:
+        thickness_mm = float(match.group(1).replace(",", "."))
+        depth_mm = float(match.group(2).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+    # Structural lumber is never thicker than it is deep, and both
+    # dimensions sit in a narrow, well-known band.
+    if not (_WOOD_METRIC_MIN_MM <= thickness_mm <= 120.0):
+        return None
+    if not (40.0 <= depth_mm <= _WOOD_METRIC_MAX_MM):
+        return None
+    if thickness_mm > depth_mm:
+        return None
+
+    return (thickness_mm / MM_PER_INCH, depth_mm / MM_PER_INCH)
 
 
 def get_material_defaults(material):

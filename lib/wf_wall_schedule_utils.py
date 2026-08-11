@@ -14,7 +14,12 @@ from wf_wall_host import (
     analyze_roof_host,
     analyze_wall_host,
 )
-from wf_materials import steel_profile_from_text
+from wf_materials import (
+    DEPTH_PARAM_NAMES,
+    WIDTH_PARAM_NAMES,
+    actual_dims_from_text,
+    steel_profile_from_text,
+)
 from wf_wall_tracking import get_tracking_data
 
 
@@ -154,6 +159,18 @@ BOM_PARAMETER_DEFS = (
         "group": "data",
         "hide_when_no_value": False,
         "description": "Member mass in KILOGRAMS (linear mass x member length).",
+    },
+    {
+        "name": "WF_Volume",
+        "guid": "7e6e6a55-0a55-4d1b-b8a1-4a0f1c2f5f7e",
+        "spec": "number",
+        "categories": (
+            DB.BuiltInCategory.OST_StructuralFraming,
+            DB.BuiltInCategory.OST_StructuralColumns,
+        ),
+        "group": "data",
+        "hide_when_no_value": False,
+        "description": "Sawn timber volume in CUBIC METERS (section x member length).",
     },
 )
 
@@ -461,6 +478,7 @@ def create_or_update_bom_schedule(doc):
     fields["member_length"] = _add_shared_field(definition, doc, "WF_MemberLength")
     fields["linear_mass"] = _add_shared_field(definition, doc, "WF_LinearMass")
     fields["total_mass"] = _add_shared_field(definition, doc, "WF_TotalMass")
+    fields["volume"] = _add_shared_field(definition, doc, "WF_Volume")
 
     fields["generated"].IsHidden = True
     fields["host_id"].IsHidden = True
@@ -479,7 +497,8 @@ def create_or_update_bom_schedule(doc):
     fields["thickness"].ColumnHeading = "Thickness (mm)"
     fields["linear_mass"].ColumnHeading = "Mass (kg/m)"
     fields["total_mass"].ColumnHeading = "Total Mass (kg)"
-    for _key in ("member_length", "total_mass"):
+    fields["volume"].ColumnHeading = "Volume (m3)"
+    for _key in ("member_length", "total_mass", "volume"):
         if fields[_key].CanTotal():
             fields[_key].DisplayType = DB.ScheduleFieldDisplayType.Totals
 
@@ -885,7 +904,7 @@ def _write_bom_metadata(element, is_generated, host_kind, host_id, host_label,
     _set_shared_text(element, "WF_HostLabel", host_label)
     _set_shared_text(element, "WF_MemberRole", member_role)
     _set_shared_double(element, "WF_MemberLength", member_length_ft or 0.0)
-    _write_steel_quantity_metadata(element, member_length_ft)
+    _write_quantity_metadata(element, member_length_ft)
 
 
 def _element_type_text(element):
@@ -902,30 +921,37 @@ def _element_type_text(element):
         return ""
 
 
-def _write_steel_quantity_metadata(element, member_length_ft):
-    """Decode the member's steel profile and stamp thickness and mass.
+def _write_quantity_metadata(element, member_length_ft):
+    """Stamp the take-off quantity a member is actually purchased by.
 
-    Mass is what a Brazilian steel take-off is actually priced on, so it is
-    derived here per instance and summed by the schedule.
+    Steel is priced by weight and timber by volume, so each member gets
+    whichever applies: a recognized steel profile yields thickness and
+    mass, and everything else is treated as sawn timber and yields cubic
+    meters. Whether the member is steel is decided by whether its
+    family/type name carries a recognizable profile designation.
 
-    Every value is left at zero / blank when it cannot be established --
-    a non-steel (wood) member, an unrecognized designation, or a profile
-    naming form that carries no thickness (e.g. the commercial "PGC 90").
-    A blank column is a visible prompt to check the family; a fabricated
-    weight would silently corrupt the take-off, so none is ever invented.
+    Every value is left blank, never guessed, when it cannot be
+    established -- an unrecognized designation, or a profile naming form
+    that carries no thickness (e.g. the commercial "PGC 90"). A blank
+    column prompts the user to check the family; a fabricated quantity
+    would silently corrupt the take-off.
     """
-    blanks = ("WF_Thickness", "WF_LinearMass", "WF_TotalMass")
+    type_text = _element_type_text(element)
     try:
-        profile = steel_profile_from_text(_element_type_text(element))
+        profile = steel_profile_from_text(type_text)
     except Exception:
         profile = None
 
     if profile is None:
+        # Timber: volume, no profile/mass.
         _set_shared_text(element, "WF_Profile", None)
-        for name in blanks:
+        for name in ("WF_Thickness", "WF_LinearMass", "WF_TotalMass"):
             _set_shared_double(element, name, 0.0)
+        _write_timber_volume_metadata(element, type_text, member_length_ft)
         return
 
+    # Steel: mass, no volume -- see _write_timber_volume_metadata.
+    _set_shared_double(element, "WF_Volume", 0.0)
     _set_shared_text(element, "WF_Profile", profile.designation)
     _set_shared_double(element, "WF_Thickness", profile.thickness_mm or 0.0)
 
@@ -940,6 +966,73 @@ def _write_steel_quantity_metadata(element, member_length_ft):
     _set_shared_double(element, "WF_TotalMass", linear_mass * length_m)
 
 
+def _symbol_param_ft(symbol, names):
+    """First positive value among the given type parameters, in feet.
+
+    AsDouble() returns Revit's internal unit (decimal feet) regardless of
+    how the family was authored or how the project displays units, so a
+    millimeter-authored Brazilian family reads correctly with no
+    conversion.
+    """
+    if symbol is None:
+        return None
+    for name in names:
+        try:
+            parameter = symbol.LookupParameter(name)
+            if parameter is None:
+                continue
+            value = parameter.AsDouble()
+            if value and value > 0.0:
+                return value
+        except Exception:
+            continue
+    return None
+
+
+def _section_dims_ft(element, type_text):
+    """(width_ft, depth_ft) for a member's cross-section.
+
+    Prefers the family type's real parameters and falls back to decoding
+    the type name. Returns None when neither yields a section.
+    """
+    symbol = getattr(element, "Symbol", None)
+    width_ft = _symbol_param_ft(symbol, WIDTH_PARAM_NAMES)
+    depth_ft = _symbol_param_ft(symbol, DEPTH_PARAM_NAMES)
+    if width_ft and depth_ft:
+        return (width_ft, depth_ft)
+
+    try:
+        dims_in = actual_dims_from_text(type_text)
+    except Exception:
+        dims_in = None
+    if not dims_in:
+        return None
+    return (dims_in[0] / 12.0, dims_in[1] / 12.0)
+
+
+def _write_timber_volume_metadata(element, type_text, member_length_ft):
+    """Stamp sawn-timber volume in CUBIC METERS.
+
+    Lumber in Brazil is bought and priced by the cubic meter, exactly as
+    steel is by the kilogram, so volume is the number a wood take-off has
+    to carry. It is computed from the solid rectangular section, which is
+    why it is written only for timber -- for a thin-walled steel profile
+    the same multiplication would describe the bounding box rather than
+    any real quantity, so steel members leave this blank and carry mass
+    instead.
+
+    Left blank, never guessed, when no section can be established.
+    """
+    dims_ft = _section_dims_ft(element, type_text)
+    if dims_ft is None:
+        _set_shared_double(element, "WF_Volume", 0.0)
+        return
+    width_m = dims_ft[0] * FT_TO_M
+    depth_m = dims_ft[1] * FT_TO_M
+    length_m = (member_length_ft or 0.0) * FT_TO_M
+    _set_shared_double(element, "WF_Volume", width_m * depth_m * length_m)
+
+
 def _clear_bom_metadata(element):
     _set_shared_int(element, "WF_IsGenerated", 0)
     _set_shared_text(element, "WF_HostKind", None)
@@ -948,7 +1041,7 @@ def _clear_bom_metadata(element):
     _set_shared_text(element, "WF_MemberRole", None)
     _set_shared_double(element, "WF_MemberLength", 0.0)
     _set_shared_text(element, "WF_Profile", None)
-    for _name in ("WF_Thickness", "WF_LinearMass", "WF_TotalMass"):
+    for _name in ("WF_Thickness", "WF_LinearMass", "WF_TotalMass", "WF_Volume"):
         _set_shared_double(element, _name, 0.0)
 
 
