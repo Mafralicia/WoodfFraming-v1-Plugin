@@ -48,6 +48,28 @@ Steel (cold-formed steel / CFS) framing has its own **dedicated tools**, separat
 - **NBR 15253 minimum thickness is checked.** Every steel tool warns before generating framing if a selected profile's base steel thickness falls below the standard's structural minimum. A thickness that cannot be determined is not reported — an unknown value is not evidence of a violation.
 - Thickness throughout is the **base steel thickness** (espessura da chapa base, excluding the zinc coating), which is the basis both NBR 6355 designations and published kg/m tables use.
 
+### Checking your own families: `Framing Audit`
+
+The engines size members from the family type's real parameters when they can read them, and fall back to decoding the type **name** when they cannot. That fallback is invisible during a normal run — an unrecognized name silently becomes a generic default and the framing comes out the wrong size.
+
+**`Framing Audit`** (Material Takeoffs panel) makes it visible before it costs anything. It walks every loaded structural framing and column type and reports, per type: whether the section came from family parameters or from the name, the resolved width/depth, the kg/m where applicable, and anything worth flagging — a thickness outside the NBR 15253 range, a web outside the standard 90/140/200 ladder, or a name it could not resolve at all. It reads the model and writes nothing.
+
+Run it once against your own template and it tells you exactly which of your families the extension understands.
+
+Names are matched tolerantly, because family names are written by whoever built the family. All of these resolve to the same profile: `Ue 90x40x12x0,95`, `Ue90x40x12x0.95`, `Ue 90 / 40 / 12 / 0,95`, `Montante 90x40x12x0,95`, `Perfilor Ue 90x40x12x0,95`, `Ue 90x40x12x0,95mm`. Web-only forms (`PGC 90`, `Guia 140`) resolve their dimensions but leave thickness — and therefore mass — unknown rather than invented.
+
+One ambiguity is resolved by dimension order: *montante* is Portuguese for "stud" in both systems, so `Montante 90x40x12x0,95` is steel (web-first, web deeper than flange) while `Montante 38x90` is timber (thickness-first, thinner than deep).
+
+### Net vs. purchase quantities
+
+The BOM schedule is a **measurement** — the length, mass and volume actually modelled. `Generate BOM` additionally prints a **purchase estimate**, which is a different thing and is labelled as such: it applies a waste allowance and rounds up to whole stock bars.
+
+- Defaults are **10% waste** and **6 m bars**. These are common starting points, *not* recommendations — change them in `lib/wf_takeoff.py` to match your supplier and your crew. The report always states the figures it used.
+- Bars are counted **per profile**, never from the grand total, because stock cannot be shared between different sections.
+- Bar counts assume the waste allowance absorbs offcut loss. This is not a nesting optimisation, so treat the figure as a floor; a real cutting plan may need one or two more per profile.
+
+The net numbers are never modified by the allowance — that separation is what keeps the measurement auditable.
+
 ### Brazilian Wood Frame sections and volume take-off
 
 - **Metric lumber sections are decoded natively.** Brazilian Wood Frame names sections by their *actual* milled size in millimeters — `38x90`, `38x140`, `38x190`, `38x240`, `45x90`, `45x140` — so unlike the North American `2x4` convention there is no nominal-to-actual translation. Sizes outside the standard ladder still resolve; the guards only reject implausible sections.

@@ -368,6 +368,22 @@ STEEL_DENSITY_KG_M3 = 7850.0
 # structural model specifying one is worth flagging.
 NBR15253_MIN_STRUCTURAL_THICKNESS_MM = 0.80
 
+# The standard's upper bound. Above this a section is outside the range
+# NBR 15253 covers -- it is not "extra safe", it is a different product,
+# so it is worth flagging just as an under-thickness section is.
+NBR15253_MAX_STRUCTURAL_THICKNESS_MM = 3.00
+
+# Web depths the standard lists for U (guia) and Ue (montante). A section
+# outside this ladder is not automatically wrong -- manufacturers offer
+# intermediate depths -- so this is documentation and a soft check, never
+# a rejection.
+NBR15253_STANDARD_WEB_DEPTHS_MM = (90.0, 140.0, 200.0)
+
+# Minimum zinc coating for structural LSF profiles: Z275 = 275 g/m2 over
+# both faces combined. Quoted thicknesses -- and the kg/m tables built on
+# them -- are BASE STEEL, excluding this coating.
+NBR15253_MIN_ZINC_COATING_G_M2 = 275.0
+
 # Section shapes, using the ABNT letters.
 SHAPE_LIPPED_CHANNEL = "Ue"   # "U enrijecido" -- montante / stud / joist
 SHAPE_PLAIN_CHANNEL = "U"     # simple channel -- guia / track
@@ -388,17 +404,31 @@ PG_ASSUMED_LIP_MM = 12.0
 _SSMA_NOMINAL_LIP_IN = {"S": 0.5, "F": 0.5, "T": 0.0, "U": 0.0}
 
 _MM_DECIMAL = r"\d{1,3}(?:[.,]\d{1,2})?"
-_NBR_SEP = r"\s*[x×X]\s*"
+_NBR_SEP = r"\s*[x×X/]\s*"
 
-_NBR_LIPPED_RE = re.compile(
-    r"\bUe\s*({0}){1}({0}){1}({0}){1}({0})".format(_MM_DECIMAL, _NBR_SEP),
+# Shape keywords, longest-first so "Montante" is not consumed as "M" and
+# "Ue" is not consumed as "U". Real family names in Brazilian projects use
+# any of these, in Portuguese or in the ABNT letters, often with a
+# manufacturer name in front -- so the pattern searches rather than
+# anchors, and everything after the keyword is optional.
+_NBR_SHAPE_WORDS = (
+    ("montante", SHAPE_LIPPED_CHANNEL),
+    ("guia", SHAPE_PLAIN_CHANNEL),
+    ("pgc", SHAPE_LIPPED_CHANNEL),
+    ("pgu", SHAPE_PLAIN_CHANNEL),
+    ("ue", SHAPE_LIPPED_CHANNEL),
+    ("u", SHAPE_PLAIN_CHANNEL),
+)
+
+_NBR_DESIGNATION_RE = re.compile(
+    r"\b(Montante|Guia|PGC|PGU|Ue|U)\s*"
+    r"({0})"
+    r"(?:{1}({0}))?"
+    r"(?:{1}({0}))?"
+    r"(?:{1}({0}))?"
+    r"\s*(?:mm)?".format(_MM_DECIMAL, _NBR_SEP),
     re.IGNORECASE | re.UNICODE,
 )
-_NBR_PLAIN_RE = re.compile(
-    r"\bU\s*({0}){1}({0}){1}({0})".format(_MM_DECIMAL, _NBR_SEP),
-    re.IGNORECASE | re.UNICODE,
-)
-_PG_RE = re.compile(r"\bPG([CU])\s*(\d{2,3})\b", re.IGNORECASE)
 
 
 def _mm(text):
@@ -483,42 +513,57 @@ def decode_nbr_designation(text):
 
     Returns None if the text carries no recognizable ABNT designation.
     """
-    text = text or ""
-
-    # Lipped ("Ue") must be tried before plain ("U") -- "U" is a prefix of
-    # "Ue", so testing plain first would mis-read every montante as a guia.
-    match = _NBR_LIPPED_RE.search(text)
+    match = _NBR_DESIGNATION_RE.search(text or "")
     if match:
-        web, flange, lip, thickness = (_mm(g) for g in match.groups())
-        if web >= 20.0 and flange > 0:
-            return SteelProfile(
-                SHAPE_LIPPED_CHANNEL, web, flange, thickness,
-                lip_mm=lip, designation=match.group(0).strip(),
-            )
+        keyword = match.group(1).lower()
+        shape = SHAPE_PLAIN_CHANNEL
+        for word, word_shape in _NBR_SHAPE_WORDS:
+            if keyword == word:
+                shape = word_shape
+                break
 
-    match = _NBR_PLAIN_RE.search(text)
-    if match:
-        web, flange, thickness = (_mm(g) for g in match.groups())
-        if web >= 20.0 and flange > 0:
-            return SteelProfile(
-                SHAPE_PLAIN_CHANNEL, web, flange, thickness,
-                designation=match.group(0).strip(),
-            )
+        numbers = [_mm(g) for g in match.groups()[1:] if g is not None]
+        web = numbers[0]
+        if web < 20.0:
+            return None
 
-    match = _PG_RE.search(text)
-    if match:
-        letter = match.group(1).upper()
-        web = float(match.group(2))
-        if web >= 20.0:
-            shape = SHAPE_LIPPED_CHANNEL if letter == "C" else SHAPE_PLAIN_CHANNEL
-            return SteelProfile(
-                shape,
-                web,
-                PG_ASSUMED_FLANGE_MM,
-                None,  # not in the name -- never invented
-                lip_mm=(PG_ASSUMED_LIP_MM if letter == "C" else 0.0),
-                designation=match.group(0).strip(),
-            )
+        # "Montante" is Portuguese for "stud" in BOTH systems, so a timber
+        # section can carry a keyword this pattern accepts -- e.g.
+        # "Montante 38x90mm" is 38 mm x 90 mm sawn timber, not a profile.
+        # The two are told apart by the order of the pair: a steel section
+        # is named web-first and its web is deeper than its flange
+        # (90x40), while timber is named thickness-first and is thinner
+        # than it is deep (38x90). A two-number name in timber order is
+        # handed back so the lumber decoder can claim it.
+        if len(numbers) == 2 and numbers[0] < numbers[1]:
+            return None
+
+        flange = lip = thickness = None
+        if len(numbers) >= 4:
+            # web x flange x lip x thickness -- only a lipped section is
+            # ever written with four dimensions.
+            flange, lip, thickness = numbers[1], numbers[2], numbers[3]
+            shape = SHAPE_LIPPED_CHANNEL
+        elif len(numbers) == 3:
+            # web x flange x thickness; the lip, if this shape has one,
+            # is not stated.
+            flange, thickness = numbers[1], numbers[2]
+        elif len(numbers) == 2:
+            flange = numbers[1]
+
+        # Anything the name does not state falls back to the documented
+        # market-standard assumption -- except thickness, which is never
+        # invented because a wrong weight is worse than a missing one.
+        if flange is None or flange <= 0:
+            flange = PG_ASSUMED_FLANGE_MM
+        if lip is None:
+            lip = PG_ASSUMED_LIP_MM if shape == SHAPE_LIPPED_CHANNEL else 0.0
+
+        return SteelProfile(
+            shape, web, flange, thickness,
+            lip_mm=(lip if shape == SHAPE_LIPPED_CHANNEL else 0.0),
+            designation=" ".join(match.group(0).split()),
+        )
 
     return None
 

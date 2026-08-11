@@ -287,6 +287,92 @@ class NbrDesignationDecodeTests(unittest.TestCase):
         self.assertEqual(m.actual_dims_from_text("2x6"), (1.5, 5.5))
 
 
+class RealWorldNamingTests(unittest.TestCase):
+    """Naming forms that turn up in actual Brazilian Revit projects.
+
+    Family names are written by whoever built the family, so the decoder
+    has to cope with Portuguese words, manufacturer prefixes, missing
+    spaces, slash separators and mm suffixes -- not just the textbook
+    ABNT form.
+    """
+
+    LIPPED_90 = (
+        "Ue 90x40x12x0,95",
+        "Ue90x40x12x0.95",
+        "Ue 90 x 40 x 12 x 0,95",
+        "Ue 90/40/12/0,95",
+        "Montante 90x40x12x0,95",
+        "Perfil Ue 90x40x12x0,95",
+        "Perfilor Ue 90x40x12x0,95",
+        "LSF Montante Ue 90x40x12x0,95",
+        "Ue 90x40x12x0,95mm",
+    )
+
+    def test_all_spellings_of_the_same_profile_agree(self):
+        for text in self.LIPPED_90:
+            profile = m.steel_profile_from_text(text)
+            self.assertIsNotNone(profile, text)
+            self.assertEqual(profile.shape, m.SHAPE_LIPPED_CHANNEL, text)
+            self.assertEqual(
+                (profile.web_mm, profile.flange_mm, profile.lip_mm,
+                 profile.thickness_mm),
+                (90.0, 40.0, 12.0, 0.95), text)
+
+    def test_portuguese_words_carry_the_shape(self):
+        self.assertEqual(
+            m.decode_nbr_designation("Guia 90x40x0,95").shape,
+            m.SHAPE_PLAIN_CHANNEL)
+        self.assertEqual(
+            m.decode_nbr_designation("Montante 90x40x12x0,95").shape,
+            m.SHAPE_LIPPED_CHANNEL)
+
+    def test_web_only_names_resolve_without_inventing_thickness(self):
+        for text in ("PGC 90", "PGC90", "Montante 90", "Guia 140"):
+            profile = m.decode_nbr_designation(text)
+            self.assertIsNotNone(profile, text)
+            self.assertIsNone(profile.thickness_mm, text)
+            self.assertIsNone(profile.linear_mass_kg_m, text)
+
+    def test_montante_is_disambiguated_between_timber_and_steel(self):
+        # "Montante" is Portuguese for "stud" in BOTH systems. The pair
+        # order decides: steel is web-first and web-deeper (90x40),
+        # timber is thickness-first and thinner than deep (38x90).
+        self.assertIsNone(m.steel_profile_from_text("Montante 38x90mm"))
+        width_in, depth_in = m.actual_dims_from_text("Montante 38x90mm")
+        self.assertAlmostEqual(width_in * 25.4, 38.0, places=6)
+        self.assertAlmostEqual(depth_in * 25.4, 90.0, places=6)
+
+        steel = m.steel_profile_from_text("Montante 90x40x12x0,95")
+        self.assertIsNotNone(steel)
+        self.assertEqual(steel.web_mm, 90.0)
+
+    def test_timber_ordered_pairs_are_never_claimed_as_steel(self):
+        for text in ("Montante 38x140", "Montante 45x190", "Guia 38x90"):
+            self.assertIsNone(m.steel_profile_from_text(text), text)
+
+    def test_a_bare_wood_size_is_untouched_by_the_shape_words(self):
+        self.assertEqual(m.actual_dims_from_text("2x6"), (1.5, 5.5))
+
+
+class Nbr15253RangeTests(unittest.TestCase):
+    def test_thickness_range_constants_bracket_the_standard(self):
+        self.assertEqual(m.NBR15253_MIN_STRUCTURAL_THICKNESS_MM, 0.80)
+        self.assertEqual(m.NBR15253_MAX_STRUCTURAL_THICKNESS_MM, 3.00)
+        self.assertLess(m.NBR15253_MIN_STRUCTURAL_THICKNESS_MM,
+                        m.NBR15253_MAX_STRUCTURAL_THICKNESS_MM)
+
+    def test_standard_web_depths_are_the_documented_ladder(self):
+        self.assertEqual(m.NBR15253_STANDARD_WEB_DEPTHS_MM, (90.0, 140.0, 200.0))
+
+    def test_standard_webs_all_decode(self):
+        for web in m.NBR15253_STANDARD_WEB_DEPTHS_MM:
+            text = "Ue {0:.0f}x40x12x0,95".format(web)
+            self.assertEqual(m.decode_nbr_designation(text).web_mm, web, text)
+
+    def test_zinc_coating_minimum_is_z275(self):
+        self.assertEqual(m.NBR15253_MIN_ZINC_COATING_G_M2, 275.0)
+
+
 class LinearMassTests(unittest.TestCase):
     """Mass is what a Brazilian steel take-off is priced on.
 

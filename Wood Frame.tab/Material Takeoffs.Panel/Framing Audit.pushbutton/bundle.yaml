@@ -1,0 +1,8 @@
+title: Framing Audit
+tooltip: >-
+  Report which loaded framing family types this extension can resolve a
+  section for, and on what basis (family parameters, ABNT/NBR profile
+  designation, SSMA designation, or metric/nominal lumber section).
+  Flags types that fall back to a generic default, and checks steel
+  profiles against the NBR 15253 thickness range.
+author: Roi Hason @ Swich Design
