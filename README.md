@@ -48,6 +48,24 @@ Steel (cold-formed steel / CFS) framing has its own **dedicated tools**, separat
 - **NBR 15253 minimum thickness is checked.** Every steel tool warns before generating framing if a selected profile's base steel thickness falls below the standard's structural minimum. A thickness that cannot be determined is not reported — an unknown value is not evidence of a violation.
 - Thickness throughout is the **base steel thickness** (espessura da chapa base, excluding the zinc coating), which is the basis both NBR 6355 designations and published kg/m tables use.
 
+### Members that could not be placed
+
+The placement loop drops a member and moves on when the family type cannot be found, the member is shorter than the minimum placeable length, or Revit refuses to create the instance. Each of those used to be a bare skip, so a run that asked for 412 members and produced 398 reported success and said nothing about the other 14.
+
+That matters more here than in most tools, because **the take-off is derived from what actually got placed** — every dropped member is a quantity the schedule silently under-reports.
+
+Every framing tool now ends with an accounting of what it could not place, grouped by cause so a hundred members failing on one missing family reads as one line:
+
+```
+### Steel Wall Framing: 14 member(s) were not placed
+Requested 412, placed 398, skipped 14.
+The take-off reflects what was placed, so these members are missing from it.
+- 11 x Family type could not be found in the project: `LSF : Ue 90x40x12x0,95`
+-  3 x Member shorter than the minimum placeable length: `CRIPPLE_STUD`
+```
+
+A run where *nothing* was placed is called out separately, since that almost always means a missing family rather than bad geometry. The behaviour is unchanged — one unplaceable member still does not abort the other 398 — only the silence is gone. The Revit API's own error message is now kept and shown rather than discarded, since it is usually the only clue to why a placement was refused.
+
 ### Checking your own families: `Framing Audit`
 
 The engines size members from the family type's real parameters when they can read them, and fall back to decoding the type **name** when they cannot. That fallback is invisible during a normal run — an unrecognized name silently becomes a generic default and the framing comes out the wrong size.

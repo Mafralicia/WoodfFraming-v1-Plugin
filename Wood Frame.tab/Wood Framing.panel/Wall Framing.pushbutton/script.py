@@ -904,6 +904,15 @@ def main():
             link = output.linkify(view.Id, title="Wall Elevation - {}".format(wall_id))
             elevation_links_text += "- {}\n".format(link)
 
+
+    # Members that could not be placed are quantities the take-off will
+    # under-report, so a run never ends silently short.
+    _placement = getattr(engine, "run_report", None)
+    if _placement is not None:
+        _placement_md = _placement.markdown()
+        if _placement_md:
+            output.print_md("\n" + _placement_md)
+
     output.print_md(
         "## Wall Framing Complete\n"
         "- **Engine:** {0}\n"

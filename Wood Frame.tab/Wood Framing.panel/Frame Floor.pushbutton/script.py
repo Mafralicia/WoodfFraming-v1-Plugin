@@ -225,6 +225,15 @@ def main():
             total_placed += len(placed)
             total_floors += 1
 
+
+    # Members that could not be placed are quantities the take-off will
+    # under-report, so a run never ends silently short.
+    _placement = getattr(engine, "run_report", None)
+    if _placement is not None:
+        _placement_md = _placement.markdown()
+        if _placement_md:
+            output.print_md("\n" + _placement_md)
+
     output.print_md(
         "## Floor Framing Complete\n"
         "- **Floors framed:** {0}\n"

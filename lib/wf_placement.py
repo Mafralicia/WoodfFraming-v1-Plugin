@@ -11,6 +11,12 @@ Cross-section rotation (STRUCTURAL_BEND_DIR_ANGLE) is set as an absolute
 value computed by the framing engine for each member.
 """
 
+from wf_diagnostics import (
+    PlacementReport,
+    REASON_API_REFUSED,
+    REASON_NO_SYMBOL,
+    REASON_TOO_SHORT,
+)
 from wf_geometry import inches_to_feet
 from wf_families import activate_symbol, find_family_symbol
 from wf_materials import DEPTH_PARAM_NAMES, WIDTH_PARAM_NAMES, set_structural_material
@@ -19,6 +25,19 @@ from wf_tracking import tag_instance
 
 
 MIN_MEMBER_LENGTH = inches_to_feet(1.0)
+
+
+def _member_type_label(member):
+    """Family : type for a member, for grouping skip reports.
+
+    Falls back to the member role so a report still says WHICH kind
+    of member went missing when no family was resolved at all.
+    """
+    family = getattr(member, "family_name", None)
+    type_name = getattr(member, "type_name", None)
+    if family or type_name:
+        return "{0} : {1}".format(family or "?", type_name or "?")
+    return getattr(member, "member_type", "") or "unknown member"
 
 
 class BaseFramingEngine(object):
@@ -46,6 +65,14 @@ class BaseFramingEngine(object):
         placed = []
         self._last_placed_pairs = []
 
+        # Every member dropped below is a quantity the take-off
+        # will under-report, so each skip is recorded rather than
+        # silently passed over. Behaviour is unchanged: one bad
+        # member must not cost the user all the others.
+        report = PlacementReport()
+        report.requested = len(members)
+        self.last_placement_report = report
+
         try:
             ensure_bom_parameters(self.doc)
         except Exception:
@@ -60,6 +87,8 @@ class BaseFramingEngine(object):
         for member in members:
             symbol = self._resolve_symbol(member)
             if symbol is None:
+                report.skip(REASON_NO_SYMBOL,
+                            _member_type_label(member))
                 continue
 
             activate_symbol(self.doc, symbol)
@@ -76,6 +105,8 @@ class BaseFramingEngine(object):
             start = member.start_point
             end = member.end_point
             if self._curve_length(start, end) < MIN_MEMBER_LENGTH:
+                report.skip(REASON_TOO_SHORT,
+                            getattr(member, "member_type", ""))
                 continue
 
             # Vertical members → Column; horizontal → Beam.
@@ -84,6 +115,7 @@ class BaseFramingEngine(object):
                      else StructuralType.Beam)
 
             is_col = getattr(member, "is_column", False)
+            api_error = ""
             if is_col and self._is_vertical_member(member):
                 instance = self._place_column_member(member, symbol, level)
             else:
@@ -92,10 +124,18 @@ class BaseFramingEngine(object):
                     instance = self.doc.Create.NewFamilyInstance(
                         line, symbol, level, stype
                     )
-                except Exception:
+                except Exception as placement_error:
+                    # The message is the only clue to why Revit
+                    # refused; discarding it left the user with a
+                    # missing member and no way to diagnose it.
+                    api_error = str(placement_error)
                     instance = None
 
             if instance is None:
+                report.skip(
+                    REASON_API_REFUSED,
+                    api_error or _member_type_label(member),
+                )
                 try:
                     mtype = getattr(member, "member_type", "UNKNOWN")
                     if mtype in ("RIDGE_BOARD", "HIP_RAFTER", "VALLEY_RAFTER"):
@@ -160,6 +200,15 @@ class BaseFramingEngine(object):
             placed.append(instance)
             self._last_placed_pairs.append((member, instance))
 
+        report.placed = len(placed)
+
+        # Tools frame several hosts per run; the user cares about
+        # the run, not the host, so reports accumulate on the engine.
+        run_report = getattr(self, "run_report", None)
+        if run_report is None:
+            run_report = PlacementReport()
+            self.run_report = run_report
+        run_report.merge(report)
         return placed
 
     # ------------------------------------------------------------------
