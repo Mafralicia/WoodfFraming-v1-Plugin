@@ -115,6 +115,9 @@ class FramingConfig(object):
 
         # Generated-member ownership tracking
         self.track_members = True
+        # Join abutting members so a stud and its plate read as one
+        # piece rather than two overlapping solids. Cosmetic only.
+        self.join_members = True
         self.debug_roof_topology = True
 
     @property

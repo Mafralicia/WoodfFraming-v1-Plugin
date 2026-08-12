@@ -111,6 +111,9 @@ class FramingConfig(object):
 
         # Generated-member ownership tracking
         self.track_members = True
+        # Join abutting members so a stud and its plate read as one
+        # piece rather than two overlapping solids. Cosmetic only.
+        self.join_members = True
 
     @property
     def stud_spacing_ft(self):

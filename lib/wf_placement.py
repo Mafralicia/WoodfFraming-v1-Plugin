@@ -11,6 +11,7 @@ Cross-section rotation (STRUCTURAL_BEND_DIR_ANGLE) is set as an absolute
 value computed by the framing engine for each member.
 """
 
+from wf_member_joins import join_placed_members
 from wf_diagnostics import (
     PlacementReport,
     REASON_API_REFUSED,
@@ -209,6 +210,18 @@ class BaseFramingEngine(object):
             run_report = PlacementReport()
             self.run_report = run_report
         run_report.merge(report)
+
+        # Abutting members read as two separate objects until Revit
+        # is told they meet. Cosmetic only -- positions, lengths and
+        # the take-off are untouched.
+        if getattr(self.config, "join_members", True):
+            try:
+                joined, failed = join_placed_members(
+                    self.doc, self._last_placed_pairs)
+                self.joins_made = getattr(self, "joins_made", 0) + joined
+                self.joins_failed = getattr(self, "joins_failed", 0) + failed
+            except Exception:
+                pass
         return placed
 
     # ------------------------------------------------------------------
